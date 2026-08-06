@@ -1,0 +1,31 @@
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: seonchaksun-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: seonchaksun
+      MYSQL_USER: seonchaksun
+      MYSQL_PASSWORD: seonchaksun
+      MYSQL_ROOT_PASSWORD: root
+      TZ: Asia/Seoul
+    ports:
+      - "3307:3306"
+    volumes:
+      - seonchaksun-mysql-data:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  seonchaksun-mysql-data:

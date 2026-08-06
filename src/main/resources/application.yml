@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: seonchaksun
+
+  datasource:
+    url: jdbc:mysql://localhost:3307/seonchaksun?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+    username: seonchaksun
+    password: seonchaksun
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        format_sql: true
+
+server:
+  port: 8080
