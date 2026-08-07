@@ -6,6 +6,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 
 import java.time.LocalDateTime;
 import java.util.Objects;
@@ -33,6 +34,16 @@ public class Event {
     @Column(name = "close_at", nullable = false)
     private LocalDateTime closeAt;
 
+    /*
+     * Optimistic Lock을 위한 버전 값.
+     *
+     * 같은 Event를 여러 트랜잭션이 동시에 수정하면
+     * Hibernate가 version을 비교해서 충돌을 감지한다.
+     */
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
+
     protected Event() {
     }
 
@@ -44,7 +55,10 @@ public class Event {
     ) {
         validateName(name);
         validateCapacity(capacity);
-        validateEventPeriod(openAt, closeAt);
+        validateEventPeriod(
+                openAt,
+                closeAt
+        );
 
         this.name = name;
         this.capacity = capacity;
@@ -59,11 +73,21 @@ public class Event {
             LocalDateTime openAt,
             LocalDateTime closeAt
     ) {
-        return new Event(name, capacity, openAt, closeAt);
+        return new Event(
+                name,
+                capacity,
+                openAt,
+                closeAt
+        );
     }
 
-    public void enter(LocalDateTime now) {
-        Objects.requireNonNull(now, "현재 시간은 null일 수 없습니다.");
+    public void enter(
+            LocalDateTime now
+    ) {
+        Objects.requireNonNull(
+                now,
+                "현재 시간은 null일 수 없습니다."
+        );
 
         validateEntryPeriod(now);
         validateCapacityAvailable();
@@ -71,7 +95,9 @@ public class Event {
         currentCount++;
     }
 
-    private void validateName(String name) {
+    private void validateName(
+            String name
+    ) {
         if (name == null || name.isBlank()) {
             throw new EventException(
                     "이벤트명은 비어 있을 수 없습니다."
@@ -79,7 +105,9 @@ public class Event {
         }
     }
 
-    private void validateCapacity(int capacity) {
+    private void validateCapacity(
+            int capacity
+    ) {
         if (capacity < 1) {
             throw new EventException(
                     "이벤트 정원은 1명 이상이어야 합니다."
@@ -104,11 +132,19 @@ public class Event {
         }
     }
 
-    private void validateEntryPeriod(LocalDateTime now) {
-        boolean isBeforeOpen = now.isBefore(openAt);
-        boolean isAtOrAfterClose = !now.isBefore(closeAt);
+    private void validateEntryPeriod(
+            LocalDateTime now
+    ) {
+        boolean isBeforeOpen =
+                now.isBefore(openAt);
 
-        if (isBeforeOpen || isAtOrAfterClose) {
+        boolean isAtOrAfterClose =
+                !now.isBefore(closeAt);
+
+        if (
+                isBeforeOpen
+                        || isAtOrAfterClose
+        ) {
             throw new EventException(
                     "이벤트 신청 기간이 아닙니다."
             );
@@ -145,5 +181,9 @@ public class Event {
 
     public LocalDateTime getCloseAt() {
         return closeAt;
+    }
+
+    public Long getVersion() {
+        return version;
     }
 }
