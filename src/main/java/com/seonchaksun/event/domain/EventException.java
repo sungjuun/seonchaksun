@@ -1,8 +1,14 @@
 package com.seonchaksun.event.domain;
 
-public class EventException extends RuntimeException {
+import com.seonchaksun.common.exception.BusinessException;
+import com.seonchaksun.common.exception.ErrorCode;
+
+public class EventException extends BusinessException {
 
     public EventException(String message) {
-        super(message);
+        super(
+                ErrorCode.INVALID_EVENT,
+                message
+        );
     }
 }

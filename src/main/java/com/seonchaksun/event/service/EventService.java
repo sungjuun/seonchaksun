@@ -1,6 +1,7 @@
 package com.seonchaksun.event.service;
 
 import com.seonchaksun.event.domain.Event;
+import com.seonchaksun.event.domain.EventNotFoundException;
 import com.seonchaksun.event.dto.EventCreateRequest;
 import com.seonchaksun.event.dto.EventResponse;
 import com.seonchaksun.event.repository.EventRepository;
@@ -18,7 +19,9 @@ public class EventService {
     }
 
     @Transactional
-    public EventResponse createEvent(EventCreateRequest request) {
+    public EventResponse createEvent(
+            EventCreateRequest request
+    ) {
         Event event = Event.create(
                 request.name(),
                 request.capacity(),
@@ -26,8 +29,19 @@ public class EventService {
                 request.closeAt()
         );
 
-        Event savedEvent = eventRepository.save(event);
+        Event savedEvent =
+                eventRepository.save(event);
 
         return EventResponse.from(savedEvent);
+    }
+
+    public EventResponse getEvent(Long eventId) {
+        Event event = eventRepository
+                .findById(eventId)
+                .orElseThrow(
+                        () -> new EventNotFoundException(eventId)
+                );
+
+        return EventResponse.from(event);
     }
 }
