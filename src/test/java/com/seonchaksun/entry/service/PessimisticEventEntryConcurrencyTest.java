@@ -27,14 +27,15 @@ import static org.mockito.Mockito.when;
 
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
-class EventEntryConcurrencyTest {
+class PessimisticEventEntryConcurrencyTest {
 
     private static final int CAPACITY = 100;
     private static final int REQUEST_COUNT = 200;
     private static final int THREAD_COUNT = 32;
 
     @Autowired
-    private EventEntryService eventEntryService;
+    private PessimisticEventEntryService
+            pessimisticEventEntryService;
 
     @Autowired
     private EventRepository eventRepository;
@@ -50,10 +51,9 @@ class EventEntryConcurrencyTest {
 
     @Test
     @DisplayName(
-            "Atomic Update를 사용하면 동시 신청에서도 정원을 초과하지 않는다"
+            "비관적 락을 사용하면 동시 신청에서도 정원을 초과하지 않는다"
     )
     void concurrentEntry() throws Exception {
-
         // given
         when(clock.instant())
                 .thenReturn(
@@ -70,7 +70,7 @@ class EventEntryConcurrencyTest {
         Event event =
                 eventRepository.save(
                         Event.create(
-                                "Atomic Update 동시성 테스트",
+                                "비관적 락 동시성 테스트",
                                 CAPACITY,
                                 LocalDateTime.of(
                                         2026,
@@ -91,35 +91,19 @@ class EventEntryConcurrencyTest {
 
         Long eventId = event.getId();
 
-        /*
-         * 동시에 실행할 실제 스레드 개수.
-         *
-         * 요청은 200개지만,
-         * 32개의 스레드가 작업을 나눠서 처리한다.
-         */
         ExecutorService executorService =
                 Executors.newFixedThreadPool(
                         THREAD_COUNT
                 );
 
-        /*
-         * 작업 스레드들이 출발 준비를 했는지 확인하기 위한 latch.
-         */
         CountDownLatch readyLatch =
                 new CountDownLatch(
                         REQUEST_COUNT
                 );
 
-        /*
-         * 모든 스레드를 최대한 동시에 출발시키기 위한 latch.
-         */
         CountDownLatch startLatch =
                 new CountDownLatch(1);
 
-        /*
-         * 200개 요청이 모두 끝날 때까지
-         * 테스트 스레드가 기다리기 위한 latch.
-         */
         CountDownLatch doneLatch =
                 new CountDownLatch(
                         REQUEST_COUNT
@@ -131,6 +115,9 @@ class EventEntryConcurrencyTest {
         AtomicInteger failureCount =
                 new AtomicInteger();
 
+        long startTime =
+                System.nanoTime();
+
         // when
         for (int i = 0;
              i < REQUEST_COUNT;
@@ -140,23 +127,12 @@ class EventEntryConcurrencyTest {
 
             executorService.submit(() -> {
 
-                /*
-                 * 해당 작업이 준비됐음을 알린다.
-                 */
                 readyLatch.countDown();
 
                 try {
-
-                    /*
-                     * startLatch가 열릴 때까지 대기.
-                     */
                     startLatch.await();
 
-                    /*
-                     * Atomic Update 방식의
-                     * 신청 Service 호출.
-                     */
-                    eventEntryService.enter(
+                    pessimisticEventEntryService.enter(
                             eventId,
                             userId
                     );
@@ -166,60 +142,32 @@ class EventEntryConcurrencyTest {
 
                 } catch (Exception e) {
 
-                    /*
-                     * 정원 초과 등으로 실패한 요청.
-                     */
                     failureCount
                             .incrementAndGet();
 
                 } finally {
 
-                    /*
-                     * 요청 처리가 끝났음을 알린다.
-                     */
                     doneLatch.countDown();
                 }
             });
         }
 
-        /*
-         * THREAD_COUNT = 32이므로
-         * 200개 요청 전체가 동시에 ready 상태가 될 수는 없다.
-         *
-         * 최대 1초 동안 준비된 스레드를 기다린다.
-         */
         readyLatch.await(
                 1,
                 TimeUnit.SECONDS
         );
 
         /*
-         * 여기부터 실제 동시 요청 처리 시간을 측정한다.
-         *
-         * 스레드 생성/등록 시간은 제외하고
-         * 실제 신청 처리 시간만 비교하기 위해
-         * startLatch.countDown() 직전에 시간을 기록한다.
-         */
-        long startTime =
-                System.nanoTime();
-
-        /*
-         * 대기 중인 스레드를 동시에 출발시킨다.
+         * 최대한 많은 요청을 동시에 출발시킨다.
          */
         startLatch.countDown();
 
-        /*
-         * 모든 요청이 끝날 때까지 최대 30초 대기.
-         */
         boolean completed =
                 doneLatch.await(
                         30,
                         TimeUnit.SECONDS
                 );
 
-        /*
-         * 모든 신청 요청 처리가 끝난 시점.
-         */
         long endTime =
                 System.nanoTime();
 
@@ -228,22 +176,6 @@ class EventEntryConcurrencyTest {
         assertThat(completed)
                 .isTrue();
 
-        /*
-         * NanoSecond → Millisecond 변환
-         */
-        long elapsedMillis =
-                TimeUnit.NANOSECONDS
-                        .toMillis(
-                                endTime - startTime
-                        );
-
-        /*
-         * 여러 스레드의 트랜잭션에서 DB를 변경했기 때문에
-         * 현재 테스트 스레드의 Persistence Context에
-         * 오래된 Event 데이터가 남아 있을 가능성이 있다.
-         *
-         * DB에서 최신 데이터를 다시 읽기 위해 clear한다.
-         */
         entityManager.clear();
 
         // then
@@ -258,15 +190,18 @@ class EventEntryConcurrencyTest {
                                 eventId
                         );
 
-        /*
-         * 테스트 결과 출력
-         */
+        long elapsedMillis =
+                TimeUnit.NANOSECONDS
+                        .toMillis(
+                                endTime - startTime
+                        );
+
         System.out.println(
                 "===================================="
         );
 
         System.out.println(
-                "Atomic Update 동시성 테스트 결과"
+                "Pessimistic Lock 동시성 테스트 결과"
         );
 
         System.out.println(
@@ -313,23 +248,11 @@ class EventEntryConcurrencyTest {
                 "===================================="
         );
 
-        /*
-         * 총 요청: 200
-         * 정원: 100
-         *
-         * 따라서 정확히 100명만 성공해야 한다.
-         */
         assertThat(
                 successCount.get()
         )
-                .isEqualTo(
-                        CAPACITY
-                );
+                .isEqualTo(CAPACITY);
 
-        /*
-         * 남은 100개의 요청은
-         * 정원 초과로 실패해야 한다.
-         */
         assertThat(
                 failureCount.get()
         )
@@ -338,34 +261,19 @@ class EventEntryConcurrencyTest {
                                 - CAPACITY
                 );
 
-        /*
-         * Event가 가지고 있는 현재 신청 인원도
-         * 정확히 정원과 같아야 한다.
-         */
         assertThat(
                 foundEvent.getCurrentCount()
         )
-                .isEqualTo(
-                        CAPACITY
-                );
+                .isEqualTo(CAPACITY);
 
-        /*
-         * 실제 EventEntry 테이블에 저장된 신청 수도
-         * 정확히 100이어야 한다.
-         */
         assertThat(
                 actualEntryCount
         )
-                .isEqualTo(
-                        CAPACITY
-                );
+                .isEqualTo(CAPACITY);
 
         /*
-         * 가장 중요한 데이터 정합성 검증.
-         *
-         * Event.currentCount
-         *          ==
-         * 실제 EventEntry row 수
+         * DB 카운터와 실제 신청 row의
+         * 데이터 정합성도 확인한다.
          */
         assertThat(
                 foundEvent.getCurrentCount()
