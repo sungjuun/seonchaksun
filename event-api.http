@@ -1,0 +1,9 @@
+POST http://localhost:8080/api/events
+Content-Type: application/json; charset=UTF-8
+
+{
+  "name": "한정판 키보드 사전예약",
+  "capacity": 100,
+  "openAt": "2026-08-10T10:00:00",
+  "closeAt": "2026-08-10T18:00:00"
+}
