@@ -102,7 +102,7 @@ class EventEntryServiceTest {
                 .thenReturn(event);
 
         when(
-                eventEntryRepository.save(
+                eventEntryRepository.saveAndFlush(
                         any(EventEntry.class)
                 )
         ).thenAnswer(
@@ -145,7 +145,7 @@ class EventEntryServiceTest {
                 );
 
         verify(eventEntryRepository)
-                .save(any(EventEntry.class));
+                .saveAndFlush(any(EventEntry.class));
     }
 
     @Test
@@ -213,7 +213,9 @@ class EventEntryServiceTest {
         verify(
                 eventEntryRepository,
                 never()
-        ).save(any(EventEntry.class));
+        ).saveAndFlush(
+                any(EventEntry.class)
+        );
     }
 
     @Test
@@ -268,6 +270,63 @@ class EventEntryServiceTest {
         ).save(any(EventEntry.class));
     }
 
+    @Test
+    @DisplayName("DB UNIQUE 제약조건 위반은 중복 신청 예외로 변환한다")
+    void convertsUniqueConstraintViolationToDuplicateEntryException() {
+
+        // given
+        Event event = createEvent();
+
+        when(
+                eventEntryRepository
+                        .existsByEventIdAndUserId(
+                                1L,
+                                1001L
+                        )
+        ).thenReturn(false);
+
+        when(
+                eventRepository
+                        .incrementCurrentCount(
+                                1L,
+                                LocalDateTime.of(
+                                        2026,
+                                        8,
+                                        10,
+                                        12,
+                                        0
+                                )
+                        )
+        ).thenReturn(1);
+
+        when(
+                eventRepository
+                        .getReferenceById(1L)
+        ).thenReturn(event);
+
+        when(
+                eventEntryRepository
+                        .saveAndFlush(
+                                any(EventEntry.class)
+                        )
+        ).thenThrow(
+                new org.springframework.dao.DataIntegrityViolationException(
+                        "Duplicate entry"
+                )
+        );
+
+        // when & then
+        assertThatThrownBy(
+                () -> eventEntryService.enter(
+                        1L,
+                        1001L
+                )
+        )
+                .isInstanceOf(
+                        DuplicateEntryException.class
+                );
+    }
+
     private Event createEvent() {
         return Event.create(
                 "한정판 키보드 사전예약",
@@ -276,4 +335,5 @@ class EventEntryServiceTest {
                 CLOSE_AT
         );
     }
+
 }
