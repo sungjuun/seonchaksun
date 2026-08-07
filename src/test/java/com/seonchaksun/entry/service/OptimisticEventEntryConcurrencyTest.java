@@ -300,7 +300,7 @@ class OptimisticEventEntryConcurrencyTest {
                 );
 
         assertThat(
-                actualEntryCountekdm
+                actualEntryCount
         )
                 .isEqualTo(
                         CAPACITY
