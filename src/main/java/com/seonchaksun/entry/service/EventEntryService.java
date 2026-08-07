@@ -36,14 +36,6 @@ public class EventEntryService {
             Long eventId,
             Long userId
     ) {
-        Event event = eventRepository
-                .findById(eventId)
-                .orElseThrow(
-                        () -> new EventNotFoundException(
-                                eventId
-                        )
-                );
-
         validateDuplicateEntry(
                 eventId,
                 userId
@@ -52,7 +44,23 @@ public class EventEntryService {
         LocalDateTime now =
                 LocalDateTime.now(clock);
 
-        event.enter(now);
+        int updatedCount =
+                eventRepository.incrementCurrentCount(
+                        eventId,
+                        now
+                );
+
+        if (updatedCount == 0) {
+            throwEntryFailure(
+                    eventId,
+                    now
+            );
+        }
+
+        Event event =
+                eventRepository.getReferenceById(
+                        eventId
+                );
 
         EventEntry entry =
                 EventEntry.create(
@@ -86,5 +94,32 @@ public class EventEntryService {
                     userId
             );
         }
+    }
+
+    private void throwEntryFailure(
+            Long eventId,
+            LocalDateTime now
+    ) {
+        Event event = eventRepository
+                .findById(eventId)
+                .orElseThrow(
+                        () -> new EventNotFoundException(
+                                eventId
+                        )
+                );
+
+        /*
+         * Atomic Update가 0건이었다면
+         * 이벤트 없음 / 신청 기간 아님 / 정원 마감
+         * 중 하나다.
+         *
+         * 이벤트 자체의 기존 도메인 규칙을 재사용해서
+         * 구체적인 EventException을 발생시킨다.
+         */
+        event.enter(now);
+
+        throw new IllegalStateException(
+                "이벤트 신청 실패 원인을 확인할 수 없습니다."
+        );
     }
 }

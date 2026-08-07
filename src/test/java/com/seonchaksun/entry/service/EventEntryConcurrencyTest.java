@@ -31,6 +31,7 @@ class EventEntryConcurrencyTest {
 
     private static final int CAPACITY = 100;
     private static final int REQUEST_COUNT = 200;
+    private static final int THREAD_COUNT = 32;
 
     @Autowired
     private EventEntryService eventEntryService;
@@ -48,7 +49,7 @@ class EventEntryConcurrencyTest {
     private Clock clock;
 
     @Test
-    @DisplayName("동시에 많은 사용자가 신청하면 Naive 구현에서 데이터 정합성이 깨진다")
+    @DisplayName("Atomic Update를 사용하면 동시 신청에서도 정원을 초과하지 않는다")
     void concurrentEntry() throws Exception {
         // given
         when(clock.instant())
@@ -68,10 +69,18 @@ class EventEntryConcurrencyTest {
                         "동시성 테스트 이벤트",
                         CAPACITY,
                         LocalDateTime.of(
-                                2026, 8, 10, 10, 0
+                                2026,
+                                8,
+                                10,
+                                10,
+                                0
                         ),
                         LocalDateTime.of(
-                                2026, 8, 10, 18, 0
+                                2026,
+                                8,
+                                10,
+                                18,
+                                0
                         )
                 )
         );
@@ -79,16 +88,22 @@ class EventEntryConcurrencyTest {
         Long eventId = event.getId();
 
         ExecutorService executorService =
-                Executors.newFixedThreadPool(32);
+                Executors.newFixedThreadPool(
+                        THREAD_COUNT
+                );
 
         CountDownLatch readyLatch =
-                new CountDownLatch(REQUEST_COUNT);
+                new CountDownLatch(
+                        REQUEST_COUNT
+                );
 
         CountDownLatch startLatch =
                 new CountDownLatch(1);
 
         CountDownLatch doneLatch =
-                new CountDownLatch(REQUEST_COUNT);
+                new CountDownLatch(
+                        REQUEST_COUNT
+                );
 
         AtomicInteger successCount =
                 new AtomicInteger();
@@ -101,9 +116,16 @@ class EventEntryConcurrencyTest {
             long userId = i + 1L;
 
             executorService.submit(() -> {
+                /*
+                 * 작업 스레드가 준비됐음을 알린다.
+                 */
                 readyLatch.countDown();
 
                 try {
+                    /*
+                     * startLatch가 열릴 때까지 기다렸다가
+                     * 최대한 동시에 신청 요청을 시작한다.
+                     */
                     startLatch.await();
 
                     eventEntryService.enter(
@@ -117,20 +139,21 @@ class EventEntryConcurrencyTest {
                     failureCount.incrementAndGet();
 
                 } finally {
+                    /*
+                     * 성공/실패 여부와 관계없이
+                     * 해당 요청이 끝났음을 알린다.
+                     */
                     doneLatch.countDown();
                 }
             });
         }
 
         /*
-         * 모든 요청을 최대한 동시에 출발시키기 위한 장치.
+         * THREAD_COUNT가 32이므로
+         * 200개 작업 전체가 동시에 ready 상태가 될 수 없다.
          *
-         * 스레드 풀은 32개이므로 REQUEST_COUNT 전체가
-         * 동시에 실행될 수는 없다.
-         *
-         * 그래서 readyLatch를 너무 오래 기다리지 않고
-         * 일정 시간이 지나면 현재 준비된 스레드를
-         * 한꺼번에 출발시킨다.
+         * 따라서 최대 1초까지만 기다린 뒤
+         * 현재 준비된 작업들을 동시에 출발시킨다.
          */
         readyLatch.await(
                 1,
@@ -147,8 +170,13 @@ class EventEntryConcurrencyTest {
 
         executorService.shutdown();
 
-        assertThat(completed).isTrue();
+        assertThat(completed)
+                .isTrue();
 
+        /*
+         * 다른 트랜잭션들이 DB를 수정했으므로
+         * 혹시 남아 있을 수 있는 1차 캐시를 비운다.
+         */
         entityManager.clear();
 
         // then
@@ -159,18 +187,30 @@ class EventEntryConcurrencyTest {
 
         long actualEntryCount =
                 eventEntryRepository
-                        .countByEventId(eventId);
+                        .countByEventId(
+                                eventId
+                        );
 
         System.out.println(
                 "===================================="
         );
 
         System.out.println(
-                "요청 수 = " + REQUEST_COUNT
+                "Atomic Update 동시성 테스트 결과"
         );
 
         System.out.println(
-                "정원 = " + CAPACITY
+                "------------------------------------"
+        );
+
+        System.out.println(
+                "요청 수 = "
+                        + REQUEST_COUNT
+        );
+
+        System.out.println(
+                "정원 = "
+                        + CAPACITY
         );
 
         System.out.println(
@@ -198,13 +238,45 @@ class EventEntryConcurrencyTest {
         );
 
         /*
-         * 지금 단계의 목적은
-         * "정상 동작을 검증"하는 것이 아니라
-         * Race Condition을 관찰하는 것이다.
+         * Atomic Update 적용 후 기대하는 정합성
          *
-         * 따라서 일부러
-         * currentCount == actualEntryCount == 100
-         * 같은 정상 조건을 assert하지 않는다.
+         * 총 요청       = 200
+         * 정원          = 100
+         *
+         * 성공          = 100
+         * 실패          = 100
+         *
+         * currentCount  = 100
+         * entry row     = 100
          */
+
+        assertThat(successCount.get())
+                .isEqualTo(CAPACITY);
+
+        assertThat(failureCount.get())
+                .isEqualTo(
+                        REQUEST_COUNT - CAPACITY
+                );
+
+        assertThat(
+                foundEvent.getCurrentCount()
+        )
+                .isEqualTo(CAPACITY);
+
+        assertThat(actualEntryCount)
+                .isEqualTo(CAPACITY);
+
+        /*
+         * 특히 중요한 정합성 검증.
+         *
+         * Event에 기록된 신청 인원과
+         * 실제 신청 내역 row 수가 반드시 같아야 한다.
+         */
+        assertThat(
+                foundEvent.getCurrentCount()
+        )
+                .isEqualTo(
+                        actualEntryCount
+                );
     }
 }

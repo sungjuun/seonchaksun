@@ -5,6 +5,7 @@ import com.seonchaksun.entry.domain.EventEntry;
 import com.seonchaksun.entry.dto.EventEntryResponse;
 import com.seonchaksun.entry.repository.EventEntryRepository;
 import com.seonchaksun.event.domain.Event;
+import com.seonchaksun.event.domain.EventException;
 import com.seonchaksun.event.domain.EventNotFoundException;
 import com.seonchaksun.event.repository.EventRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -70,13 +71,10 @@ class EventEntryServiceTest {
     }
 
     @Test
-    @DisplayName("이벤트에 정상적으로 신청한다")
+    @DisplayName("Atomic Update로 이벤트에 정상 신청한다")
     void enter() {
         // given
         Event event = createEvent();
-
-        when(eventRepository.findById(1L))
-                .thenReturn(Optional.of(event));
 
         when(
                 eventEntryRepository
@@ -85,6 +83,23 @@ class EventEntryServiceTest {
                                 1001L
                         )
         ).thenReturn(false);
+
+        when(
+                eventRepository
+                        .incrementCurrentCount(
+                                1L,
+                                LocalDateTime.of(
+                                        2026,
+                                        8,
+                                        10,
+                                        12,
+                                        0
+                                )
+                        )
+        ).thenReturn(1);
+
+        when(eventRepository.getReferenceById(1L))
+                .thenReturn(event);
 
         when(
                 eventEntryRepository.save(
@@ -103,9 +118,6 @@ class EventEntryServiceTest {
                 );
 
         // then
-        assertThat(event.getCurrentCount())
-                .isEqualTo(1);
-
         assertThat(response.userId())
                 .isEqualTo(1001L);
 
@@ -121,12 +133,15 @@ class EventEntryServiceTest {
                 );
 
         verify(eventRepository)
-                .findById(1L);
-
-        verify(eventEntryRepository)
-                .existsByEventIdAndUserId(
+                .incrementCurrentCount(
                         1L,
-                        1001L
+                        LocalDateTime.of(
+                                2026,
+                                8,
+                                10,
+                                12,
+                                0
+                        )
                 );
 
         verify(eventEntryRepository)
@@ -134,13 +149,57 @@ class EventEntryServiceTest {
     }
 
     @Test
+    @DisplayName("이미 신청한 사용자는 중복 신청할 수 없다")
+    void cannotEnterDuplicate() {
+        when(
+                eventEntryRepository
+                        .existsByEventIdAndUserId(
+                                1L,
+                                1001L
+                        )
+        ).thenReturn(true);
+
+        assertThatThrownBy(
+                () -> eventEntryService.enter(
+                        1L,
+                        1001L
+                )
+        )
+                .isInstanceOf(
+                        DuplicateEntryException.class
+                );
+
+        verify(
+                eventRepository,
+                never()
+        ).incrementCurrentCount(
+                any(),
+                any()
+        );
+    }
+
+    @Test
     @DisplayName("존재하지 않는 이벤트에는 신청할 수 없다")
     void cannotEnterMissingEvent() {
-        // given
+        when(
+                eventEntryRepository
+                        .existsByEventIdAndUserId(
+                                999L,
+                                1001L
+                        )
+        ).thenReturn(false);
+
+        when(
+                eventRepository
+                        .incrementCurrentCount(
+                                any(),
+                                any()
+                        )
+        ).thenReturn(0);
+
         when(eventRepository.findById(999L))
                 .thenReturn(Optional.empty());
 
-        // when & then
         assertThatThrownBy(
                 () -> eventEntryService.enter(
                         999L,
@@ -158,35 +217,50 @@ class EventEntryServiceTest {
     }
 
     @Test
-    @DisplayName("이미 신청한 사용자는 중복 신청할 수 없다")
-    void cannotEnterDuplicate() {
-        // given
-        Event event = createEvent();
+    @DisplayName("정원이 가득 차면 신청할 수 없다")
+    void cannotEnterFullEvent() {
+        Event event = Event.create(
+                "선착순 이벤트",
+                1,
+                OPEN_AT,
+                CLOSE_AT
+        );
 
-        when(eventRepository.findById(1L))
-                .thenReturn(Optional.of(event));
+        event.enter(
+                LocalDateTime.of(
+                        2026, 8, 10, 11, 0
+                )
+        );
 
         when(
                 eventEntryRepository
                         .existsByEventIdAndUserId(
                                 1L,
-                                1001L
+                                1002L
                         )
-        ).thenReturn(true);
+        ).thenReturn(false);
 
-        // when & then
+        when(
+                eventRepository
+                        .incrementCurrentCount(
+                                any(),
+                                any()
+                        )
+        ).thenReturn(0);
+
+        when(eventRepository.findById(1L))
+                .thenReturn(Optional.of(event));
+
         assertThatThrownBy(
                 () -> eventEntryService.enter(
                         1L,
-                        1001L
+                        1002L
                 )
         )
-                .isInstanceOf(
-                        DuplicateEntryException.class
+                .isInstanceOf(EventException.class)
+                .hasMessage(
+                        "이벤트 신청이 마감되었습니다."
                 );
-
-        assertThat(event.getCurrentCount())
-                .isZero();
 
         verify(
                 eventEntryRepository,
