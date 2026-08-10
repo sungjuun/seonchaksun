@@ -40,6 +40,10 @@ public interface EventRepository
 
     /*
      * Pessimistic Lock
+     *
+     * Pessimistic 전략에서도 사용하고,
+     * Atomic Update 실패 원인을
+     * 최신 DB 상태 기준으로 판별할 때도 사용한다.
      */
     @Lock(
             LockModeType.PESSIMISTIC_WRITE
