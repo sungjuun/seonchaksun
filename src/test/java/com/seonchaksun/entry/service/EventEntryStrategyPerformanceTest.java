@@ -1,6 +1,8 @@
 package com.seonchaksun.entry.service;
 
 import com.seonchaksun.TestcontainersConfiguration;
+import com.seonchaksun.entry.redis.RedisCapacityService;
+import com.seonchaksun.entry.redis.RedisEventEntryService;
 import com.seonchaksun.entry.repository.EventEntryRepository;
 import com.seonchaksun.event.domain.Event;
 import com.seonchaksun.event.repository.EventRepository;
@@ -38,12 +40,13 @@ class EventEntryStrategyPerformanceTest {
     private static final int THREAD_COUNT = 32;
 
     /*
-     * 실제 성능 측정 횟수.
+     * 각 전략의 실제 성능 측정 횟수.
      */
     private static final int MEASURE_COUNT = 5;
 
     @Autowired
-    private EventEntryService atomicEventEntryService;
+    private EventEntryService
+            atomicEventEntryService;
 
     @Autowired
     private PessimisticEventEntryService
@@ -53,22 +56,39 @@ class EventEntryStrategyPerformanceTest {
     private OptimisticEventEntryService
             optimisticEventEntryService;
 
+    /*
+     * Redis + MySQL 전략.
+     */
     @Autowired
-    private EventRepository eventRepository;
+    private RedisEventEntryService
+            redisEventEntryService;
+
+    /*
+     * Redis 전략의 정합성 검증 및
+     * 테스트 데이터 초기화에 사용한다.
+     */
+    @Autowired
+    private RedisCapacityService
+            redisCapacityService;
+
+    @Autowired
+    private EventRepository
+            eventRepository;
 
     @Autowired
     private EventEntryRepository
             eventEntryRepository;
 
     @Autowired
-    private EntityManager entityManager;
+    private EntityManager
+            entityManager;
 
     @MockitoBean
     private Clock clock;
 
     @Test
     @DisplayName(
-            "Atomic, Pessimistic, Optimistic 동시성 전략의 처리 시간을 비교한다"
+            "Atomic, Pessimistic, Optimistic, Redis 동시성 전략의 처리 시간을 비교한다"
     )
     void compareConcurrencyStrategies()
             throws Exception {
@@ -89,25 +109,35 @@ class EventEntryStrategyPerformanceTest {
                 );
 
         /*
-         * 각각의 전략을 동일한 조건으로
-         * 5회씩 실행한다.
+         * 모든 전략을 동일한 조건으로
+         * 각각 5회씩 실행한다.
          */
         List<Long> atomicTimes =
                 measureStrategy(
                         "Atomic Update",
+                        StrategyType.DATABASE,
                         atomicEventEntryService::enter
                 );
 
         List<Long> pessimisticTimes =
                 measureStrategy(
                         "Pessimistic Lock",
+                        StrategyType.DATABASE,
                         pessimisticEventEntryService::enter
                 );
 
         List<Long> optimisticTimes =
                 measureStrategy(
                         "Optimistic Lock",
+                        StrategyType.DATABASE,
                         optimisticEventEntryService::enter
+                );
+
+        List<Long> redisTimes =
+                measureStrategy(
+                        "Redis + MySQL",
+                        StrategyType.REDIS,
+                        redisEventEntryService::enter
                 );
 
         /*
@@ -116,12 +146,14 @@ class EventEntryStrategyPerformanceTest {
         printComparison(
                 atomicTimes,
                 pessimisticTimes,
-                optimisticTimes
+                optimisticTimes,
+                redisTimes
         );
     }
 
     private List<Long> measureStrategy(
             String strategyName,
+            StrategyType strategyType,
             EntryExecutor entryExecutor
     ) throws Exception {
 
@@ -129,6 +161,7 @@ class EventEntryStrategyPerformanceTest {
                 new ArrayList<>();
 
         System.out.println();
+
         System.out.println(
                 "============================================"
         );
@@ -151,6 +184,7 @@ class EventEntryStrategyPerformanceTest {
             long elapsedMillis =
                     runOnce(
                             strategyName,
+                            strategyType,
                             round,
                             entryExecutor
                     );
@@ -170,6 +204,7 @@ class EventEntryStrategyPerformanceTest {
 
     private long runOnce(
             String strategyName,
+            StrategyType strategyType,
             int round,
             EntryExecutor entryExecutor
     ) throws Exception {
@@ -177,8 +212,8 @@ class EventEntryStrategyPerformanceTest {
         /*
          * 각 측정마다 새로운 Event를 생성한다.
          *
-         * 이전 테스트의 currentCount나 EventEntry가
-         * 다음 측정에 영향을 주지 않도록 하기 위함이다.
+         * 이전 측정의 currentCount나 EventEntry가
+         * 다음 측정에 영향을 주지 않도록 한다.
          */
         Event event =
                 eventRepository.save(
@@ -207,208 +242,339 @@ class EventEntryStrategyPerformanceTest {
         Long eventId =
                 event.getId();
 
-        ExecutorService executorService =
-                Executors.newFixedThreadPool(
-                        THREAD_COUNT
-                );
-
         /*
-         * 실제 Thread Pool 크기는 32개다.
-         *
-         * 32개의 worker가 준비되면
-         * 동시에 출발시킨다.
+         * Redis 전략의 경우
+         * 혹시 동일 eventId에 테스트 값이 남아 있다면
+         * 측정 전에 제거한다.
          */
-        CountDownLatch readyLatch =
-                new CountDownLatch(
-                        THREAD_COUNT
-                );
+        if (strategyType == StrategyType.REDIS) {
 
-        CountDownLatch startLatch =
-                new CountDownLatch(1);
-
-        CountDownLatch doneLatch =
-                new CountDownLatch(
-                        REQUEST_COUNT
-                );
-
-        AtomicInteger successCount =
-                new AtomicInteger();
-
-        AtomicInteger failureCount =
-                new AtomicInteger();
-
-        /*
-         * 200개의 요청 등록
-         */
-        for (
-                int i = 0;
-                i < REQUEST_COUNT;
-                i++
-        ) {
-
-            long userId =
-                    i + 1L;
-
-            executorService.submit(
-                    () -> {
-
-                        /*
-                         * 처음 실행되는 32개의 worker가
-                         * 준비되었음을 알린다.
-                         *
-                         * CountDownLatch는 0 아래로
-                         * 내려가지 않기 때문에
-                         * 이후 요청의 countDown은 문제없다.
-                         */
-                        readyLatch.countDown();
-
-                        try {
-
-                            startLatch.await();
-
-                            entryExecutor.enter(
-                                    eventId,
-                                    userId
-                            );
-
-                            successCount
-                                    .incrementAndGet();
-
-                        } catch (
-                                Exception e
-                        ) {
-
-                            failureCount
-                                    .incrementAndGet();
-
-                        } finally {
-
-                            doneLatch.countDown();
-                        }
-                    }
+            redisCapacityService.clear(
+                    eventId
             );
         }
 
-        /*
-         * 실제 worker 32개가 준비될 때까지 기다린다.
-         */
-        boolean ready =
-                readyLatch.await(
-                        5,
-                        TimeUnit.SECONDS
+        try {
+
+            ExecutorService executorService =
+                    Executors.newFixedThreadPool(
+                            THREAD_COUNT
+                    );
+
+            /*
+             * 실제 Thread Pool 크기는 32개다.
+             *
+             * 32개의 Worker가 준비되면
+             * 동시에 출발시킨다.
+             */
+            CountDownLatch readyLatch =
+                    new CountDownLatch(
+                            THREAD_COUNT
+                    );
+
+            CountDownLatch startLatch =
+                    new CountDownLatch(1);
+
+            CountDownLatch doneLatch =
+                    new CountDownLatch(
+                            REQUEST_COUNT
+                    );
+
+            AtomicInteger successCount =
+                    new AtomicInteger();
+
+            AtomicInteger failureCount =
+                    new AtomicInteger();
+
+            /*
+             * 200개의 서로 다른 사용자 요청을 등록한다.
+             */
+            for (
+                    int i = 0;
+                    i < REQUEST_COUNT;
+                    i++
+            ) {
+
+                long userId =
+                        i + 1L;
+
+                executorService.submit(
+                        () -> {
+
+                            /*
+                             * 처음 실행되는 32개의 Worker가
+                             * 준비되었음을 알린다.
+                             *
+                             * CountDownLatch는 0 아래로
+                             * 내려가지 않기 때문에
+                             * 이후 요청의 countDown()은
+                             * 문제가 없다.
+                             */
+                            readyLatch.countDown();
+
+                            try {
+
+                                startLatch.await();
+
+                                entryExecutor.enter(
+                                        eventId,
+                                        userId
+                                );
+
+                                successCount
+                                        .incrementAndGet();
+
+                            } catch (
+                                    Exception e
+                            ) {
+
+                                failureCount
+                                        .incrementAndGet();
+
+                            } finally {
+
+                                doneLatch.countDown();
+                            }
+                        }
+                );
+            }
+
+            /*
+             * 실제 Worker 32개가 준비될 때까지 기다린다.
+             */
+            boolean ready =
+                    readyLatch.await(
+                            5,
+                            TimeUnit.SECONDS
+                    );
+
+            assertThat(ready)
+                    .isTrue();
+
+            /*
+             * 모든 전략에서 정확히 같은 위치부터
+             * 처리 시간을 측정한다.
+             */
+            long startTime =
+                    System.nanoTime();
+
+            startLatch.countDown();
+
+            boolean completed =
+                    doneLatch.await(
+                            30,
+                            TimeUnit.SECONDS
+                    );
+
+            long endTime =
+                    System.nanoTime();
+
+            executorService.shutdown();
+
+            if (!executorService.awaitTermination(
+                    5,
+                    TimeUnit.SECONDS
+            )) {
+
+                executorService.shutdownNow();
+            }
+
+            assertThat(completed)
+                    .isTrue();
+
+            long elapsedMillis =
+                    TimeUnit.NANOSECONDS
+                            .toMillis(
+                                    endTime - startTime
+                            );
+
+            /*
+             * Worker Transaction에서 DB 상태가
+             * 변경되었기 때문에 최신 데이터를
+             * 다시 읽기 위해 Persistence Context를
+             * 초기화한다.
+             */
+            entityManager.clear();
+
+            Event foundEvent =
+                    eventRepository
+                            .findById(
+                                    eventId
+                            )
+                            .orElseThrow();
+
+            long actualEntryCount =
+                    eventEntryRepository
+                            .countByEventId(
+                                    eventId
+                            );
+
+            /*
+             * 공통 정합성 검증.
+             *
+             * 어떤 전략을 사용하더라도
+             *
+             * 성공 100
+             * 실패 100
+             * EventEntry 100
+             *
+             * 이어야 한다.
+             */
+            assertThat(
+                    successCount.get()
+            )
+                    .isEqualTo(
+                            CAPACITY
+                    );
+
+            assertThat(
+                    failureCount.get()
+            )
+                    .isEqualTo(
+                            REQUEST_COUNT
+                                    - CAPACITY
+                    );
+
+            assertThat(
+                    actualEntryCount
+            )
+                    .isEqualTo(
+                            CAPACITY
+                    );
+
+            /*
+             * 전략별 정합성 검증.
+             */
+            if (
+                    strategyType
+                            == StrategyType.REDIS
+            ) {
+
+                verifyRedisConsistency(
+                        eventId,
+                        foundEvent,
+                        actualEntryCount
                 );
 
-        assertThat(ready)
-                .isTrue();
+            } else {
 
-        /*
-         * 모든 전략에서 정확히 같은 위치부터
-         * 처리 시간을 측정한다.
-         */
-        long startTime =
-                System.nanoTime();
-
-        startLatch.countDown();
-
-        boolean completed =
-                doneLatch.await(
-                        30,
-                        TimeUnit.SECONDS
+                verifyDatabaseConsistency(
+                        foundEvent,
+                        actualEntryCount
                 );
+            }
 
-        long endTime =
-                System.nanoTime();
+            System.out.printf(
+                    "%s - %d회: %d ms "
+                            + "(성공=%d, 실패=%d)%n",
+                    strategyName,
+                    round,
+                    elapsedMillis,
+                    successCount.get(),
+                    failureCount.get()
+            );
 
-        executorService.shutdown();
+            return elapsedMillis;
 
-        if (!executorService.awaitTermination(
-                5,
-                TimeUnit.SECONDS
-        )) {
-            executorService.shutdownNow();
+        } finally {
+
+            /*
+             * Redis 전략은 MySQL Transaction과 별도로
+             * Redis 데이터가 존재하므로
+             * 매 측정 후 반드시 제거한다.
+             */
+            if (
+                    strategyType
+                            == StrategyType.REDIS
+            ) {
+
+                redisCapacityService.clear(
+                        eventId
+                );
+            }
         }
+    }
 
-        assertThat(completed)
-                .isTrue();
+    /*
+     * Atomic / Pessimistic / Optimistic 전략의
+     * 정합성 검증.
+     *
+     * 이 세 전략에서는 MySQL events.current_count가
+     * 정원 관리의 기준이다.
+     */
+    private void verifyDatabaseConsistency(
+            Event event,
+            long actualEntryCount
+    ) {
 
-        long elapsedMillis =
-                TimeUnit.NANOSECONDS
-                        .toMillis(
-                                endTime - startTime
-                        );
+        assertThat(
+                event.getCurrentCount()
+        )
+                .isEqualTo(
+                        CAPACITY
+                );
 
-        /*
-         * worker transaction에서 DB가 변경되었으므로
-         * 최신 상태를 다시 조회하기 위해
-         * Persistence Context를 초기화한다.
-         */
-        entityManager.clear();
+        assertThat(
+                event.getCurrentCount()
+        )
+                .isEqualTo(
+                        actualEntryCount
+                );
+    }
 
-        Event foundEvent =
-                eventRepository
-                        .findById(eventId)
-                        .orElseThrow();
+    /*
+     * Redis 전략의 정합성 검증.
+     *
+     * Redis 전략에서는
+     * events.current_count가 아니라
+     * Redis Counter가 정원 제어의 기준이다.
+     */
+    private void verifyRedisConsistency(
+            Long eventId,
+            Event event,
+            long actualEntryCount
+    ) {
 
-        long actualEntryCount =
-                eventEntryRepository
-                        .countByEventId(
+        long redisCount =
+                redisCapacityService
+                        .getCurrentCount(
                                 eventId
                         );
 
         /*
-         * 성능을 측정하는 테스트라고 해도
-         * 정합성이 깨진 결과를 성능 데이터로
-         * 사용해서는 안 된다.
-         *
-         * 따라서 매 회차마다 정합성도 검증한다.
+         * Redis에서 정확히 정원까지만
+         * 예약되었는지 확인한다.
          */
         assertThat(
-                successCount.get()
+                redisCount
         )
                 .isEqualTo(
                         CAPACITY
                 );
 
+        /*
+         * Redis가 허용한 신청 수와
+         * MySQL에 실제 저장된 신청 수가
+         * 일치해야 한다.
+         */
         assertThat(
-                failureCount.get()
-        )
-                .isEqualTo(
-                        REQUEST_COUNT
-                                - CAPACITY
-                );
-
-        assertThat(
-                foundEvent.getCurrentCount()
-        )
-                .isEqualTo(
-                        CAPACITY
-                );
-
-        assertThat(
-                actualEntryCount
-        )
-                .isEqualTo(
-                        CAPACITY
-                );
-
-        assertThat(
-                foundEvent.getCurrentCount()
+                redisCount
         )
                 .isEqualTo(
                         actualEntryCount
                 );
 
-        System.out.printf(
-                "%s - %d회: %d ms "
-                        + "(성공=%d, 실패=%d)%n",
-                strategyName,
-                round,
-                elapsedMillis,
-                successCount.get(),
-                failureCount.get()
-        );
-
-        return elapsedMillis;
+        /*
+         * 현재 Redis 전략에서는
+         * DB events.current_count를 사용하지 않는다.
+         *
+         * 따라서 이 값은 생성 당시 값인
+         * 0을 유지하는 것이 현재 설계상 정상이다.
+         */
+        assertThat(
+                event.getCurrentCount()
+        )
+                .isZero();
     }
 
     private void printStrategySummary(
@@ -482,7 +648,8 @@ class EventEntryStrategyPerformanceTest {
     private void printComparison(
             List<Long> atomicTimes,
             List<Long> pessimisticTimes,
-            List<Long> optimisticTimes
+            List<Long> optimisticTimes,
+            List<Long> redisTimes
     ) {
 
         PerformanceSummary atomic =
@@ -500,9 +667,15 @@ class EventEntryStrategyPerformanceTest {
                         optimisticTimes
                 );
 
+        PerformanceSummary redis =
+                PerformanceSummary.from(
+                        redisTimes
+                );
+
         System.out.println();
+
         System.out.println(
-                "=============================================================="
+                "======================================================================"
         );
 
         System.out.println(
@@ -514,7 +687,7 @@ class EventEntryStrategyPerformanceTest {
                         + REQUEST_COUNT
                         + " / 정원 "
                         + CAPACITY
-                        + " / Thread "
+                        + " / 최대 동시 Thread "
                         + THREAD_COUNT
                         + " / "
                         + MEASURE_COUNT
@@ -522,7 +695,7 @@ class EventEntryStrategyPerformanceTest {
         );
 
         System.out.println(
-                "--------------------------------------------------------------"
+                "----------------------------------------------------------------------"
         );
 
         System.out.printf(
@@ -557,13 +730,21 @@ class EventEntryStrategyPerformanceTest {
                 optimistic.max()
         );
 
+        System.out.printf(
+                "%-20s %10.2fms %10dms %10dms%n",
+                "Redis + MySQL",
+                redis.average(),
+                redis.min(),
+                redis.max()
+        );
+
         System.out.println(
-                "=============================================================="
+                "======================================================================"
         );
     }
 
     /*
-     * 세 Service의 enter 메서드를
+     * 네 Service의 enter() 메서드를
      * 동일한 방식으로 호출하기 위한 함수형 인터페이스.
      */
     @FunctionalInterface
@@ -576,8 +757,20 @@ class EventEntryStrategyPerformanceTest {
     }
 
     /*
+     * DB 기반 전략과 Redis 전략은
+     * 정합성 검증 기준이 다르기 때문에
+     * 이를 명시적으로 구분한다.
+     */
+    private enum StrategyType {
+
+        DATABASE,
+
+        REDIS
+    }
+
+    /*
      * 측정 결과를 평균 / 최소 / 최대 형태로
-     * 관리하기 위한 간단한 record.
+     * 관리하기 위한 record.
      */
     private record PerformanceSummary(
             double average,

@@ -84,11 +84,6 @@ public class Event {
     public void enter(
             LocalDateTime now
     ) {
-        Objects.requireNonNull(
-                now,
-                "현재 시간은 null일 수 없습니다."
-        );
-
         validateEntryPeriod(now);
         validateCapacityAvailable();
 
@@ -132,9 +127,14 @@ public class Event {
         }
     }
 
-    private void validateEntryPeriod(
+    public void validateEntryPeriod(
             LocalDateTime now
     ) {
+        Objects.requireNonNull(
+                now,
+                "현재 시간은 null일 수 없습니다."
+        );
+
         boolean isBeforeOpen =
                 now.isBefore(openAt);
 
