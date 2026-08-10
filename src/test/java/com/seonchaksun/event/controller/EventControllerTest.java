@@ -1,5 +1,6 @@
 package com.seonchaksun.event.controller;
 
+import com.seonchaksun.event.service.EventStatusService;
 import com.seonchaksun.event.domain.EventException;
 import com.seonchaksun.event.domain.EventNotFoundException;
 import com.seonchaksun.event.dto.EventCreateRequest;
@@ -42,6 +43,9 @@ class EventControllerTest {
 
     @MockitoBean
     private EventService eventService;
+
+    @MockitoBean
+    private EventStatusService eventStatusService;
 
     @Test
     @DisplayName("이벤트 생성 요청이 성공하면 201 응답을 반환한다")
