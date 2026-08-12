@@ -1,0 +1,12 @@
+.gradle
+build
+.idea
+.git
+.gitignore
+
+frontend
+docs
+k6
+
+*.iml
+README.md

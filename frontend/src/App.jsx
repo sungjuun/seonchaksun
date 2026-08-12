@@ -391,7 +391,7 @@ function App() {
                     <div className="selector-copy">
 
                         <span className="section-kicker">
-                            EVENT SELECTOR
+                            이벤트 선택
                         </span>
 
                         <strong>

@@ -62,7 +62,7 @@ function EntryPanel({
                 <div>
 
                     <span className="section-kicker">
-                        ENTRY CONSOLE
+                        신청 테스트
                     </span>
 
                     <h2>

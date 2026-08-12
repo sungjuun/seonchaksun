@@ -47,16 +47,15 @@ function BenchmarkSection() {
                 <div>
 
                     <span className="section-kicker">
-                        LOAD TEST
+                        성능 비교
                     </span>
 
                     <h2>
-                        HTTP Benchmark
+                        동시성 전략 성능 비교
                     </h2>
 
                     <p>
-                        k6 · 200 requests ·
-                        32 VUs · capacity 100
+                        k6 · 200개 요청 · 동시 사용자 32명 · 정원 100명
                     </p>
 
                 </div>
@@ -84,11 +83,11 @@ function BenchmarkSection() {
                 <div className="benchmark-table-head">
 
                     <span>
-                        Strategy
+                        전략
                     </span>
 
                     <span>
-                        Avg
+                        평균응답
                     </span>
 
                     <span>
@@ -100,7 +99,7 @@ function BenchmarkSection() {
                     </span>
 
                     <span>
-                        Req/s
+                        초당 처리량
                     </span>
 
                 </div>
@@ -179,20 +178,19 @@ function BenchmarkSection() {
                 <div className="incident-copy">
 
                     <span className="section-kicker">
-                        INCIDENT ANALYSIS
+                        장애 분석
                     </span>
 
                     <h3>
-                        Atomic Update
-                        failure-path 개선
+                        Atomic Update 실패 경로 개선
                     </h3>
 
                     <p>
-                        REPEATABLE READ 환경에서
-                        실패 원인을 판별할 때
-                        이전 snapshot을 읽어
-                        HTTP 500이 발생했던 문제를
-                        부하 테스트로 발견했습니다.
+                        MySQL REPEATABLE READ 환경에서
+                        실패 원인을 확인하는 과정 중
+                        이전 스냅샷을 조회해 HTTP 500이 발생하는 문제를
+                        부하 테스트로 발견하고,
+                        Locking Read를 적용해 개선했습니다.
                     </p>
 
                     <div className="incident-tags">

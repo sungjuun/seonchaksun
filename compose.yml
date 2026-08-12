@@ -1,31 +1,143 @@
 services:
+
   mysql:
     image: mysql:8.4
     container_name: seonchaksun-mysql
-    restart: unless-stopped
+
     environment:
       MYSQL_DATABASE: seonchaksun
       MYSQL_USER: seonchaksun
       MYSQL_PASSWORD: seonchaksun
       MYSQL_ROOT_PASSWORD: root
       TZ: Asia/Seoul
+
     ports:
       - "3307:3306"
+
     volumes:
       - seonchaksun-mysql-data:/var/lib/mysql
+
     command:
       - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_0900_ai_ci
+      - --collation-server=utf8mb4_unicode_ci
+
     healthcheck:
       test:
         [
-          "CMD-SHELL",
-          "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD"
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-uroot",
+          "-proot"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    restart: unless-stopped
+
+
+  redis:
+    image: redis:8
+    container_name: seonchaksun-redis
+
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - seonchaksun-redis-data:/data
+
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "redis-cli",
+          "ping"
         ]
       interval: 5s
       timeout: 3s
       retries: 10
-      start_period: 20s
+
+    restart: unless-stopped
+
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: seonchaksun-backend
+
+    environment:
+      DB_URL: jdbc:mysql://mysql:3306/seonchaksun?serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+      DB_USERNAME: seonchaksun
+      DB_PASSWORD: seonchaksun
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+      TZ: Asia/Seoul
+
+    ports:
+      - "8080:8080"
+
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+      redis:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    container_name: seonchaksun-prometheus
+
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - seonchaksun-prometheus-data:/prometheus
+
+    ports:
+      - "9090:9090"
+
+    depends_on:
+      - backend
+
+    restart: unless-stopped
+
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: seonchaksun-grafana
+
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+
+    volumes:
+      - seonchaksun-grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+
+    ports:
+      - "3000:3000"
+
+    depends_on:
+      - prometheus
+
+    restart: unless-stopped
+
 
 volumes:
   seonchaksun-mysql-data:
+  seonchaksun-redis-data:
+  seonchaksun-prometheus-data:
+  seonchaksun-grafana-data:

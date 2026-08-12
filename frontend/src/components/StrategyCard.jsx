@@ -98,8 +98,8 @@ function StrategyCard({
 
                 <span>
                     {selected
-                        ? "Selected"
-                        : "Select strategy"}
+                        ? "현재 선택됨"
+                        : "이 전략으로 테스트"}
                 </span>
 
             </div>

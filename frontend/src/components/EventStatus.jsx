@@ -41,7 +41,7 @@ function EventStatus({
                 <div>
 
                     <span className="section-kicker">
-                        LIVE EVENT
+                        현재 이벤트
                     </span>
 
                     <h2>
@@ -107,7 +107,7 @@ function EventStatus({
                 <div className="progress-meta">
 
                     <span>
-                        Capacity usage
+                        정원 사용률
                     </span>
 
                     <strong>
@@ -138,7 +138,7 @@ function EventStatus({
                 <div className="metadata-item">
 
                     <span>
-                        Count Source
+                        인원 기준
                     </span>
 
                     <strong
@@ -157,7 +157,7 @@ function EventStatus({
                 <div className="metadata-item">
 
                     <span>
-                        Strategy
+                        적용 전략
                     </span>
 
                     <strong>
@@ -171,7 +171,7 @@ function EventStatus({
                 <div className="metadata-item">
 
                     <span>
-                        Open
+                        신청 시작
                     </span>
 
                     <strong>
@@ -185,7 +185,7 @@ function EventStatus({
                 <div className="metadata-item">
 
                     <span>
-                        Close
+                        신청 마감
                     </span>
 
                     <strong>
