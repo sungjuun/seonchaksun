@@ -1,35 +1,34 @@
 package com.seonchaksun.event.service;
 
+import com.seonchaksun.common.exception.BusinessException;
+import com.seonchaksun.common.exception.ErrorCode;
+import com.seonchaksun.entry.redis.RedisCapacityService;
 import com.seonchaksun.entry.service.EntryStrategy;
 import com.seonchaksun.event.domain.Event;
 import com.seonchaksun.event.domain.EventNotFoundException;
 import com.seonchaksun.event.dto.EventStatusResponse;
 import com.seonchaksun.event.repository.EventRepository;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class EventStatusService {
 
-    private static final String REDIS_CAPACITY_KEY_PREFIX =
-            "event:capacity:";
-
     private final EventRepository eventRepository;
-    private final StringRedisTemplate redisTemplate;
+    private final RedisCapacityService redisCapacityService;
 
     public EventStatusService(
             EventRepository eventRepository,
-            StringRedisTemplate redisTemplate
+            RedisCapacityService redisCapacityService
     ) {
         this.eventRepository = eventRepository;
-        this.redisTemplate = redisTemplate;
+        this.redisCapacityService = redisCapacityService;
     }
 
     @Transactional(readOnly = true)
     public EventStatusResponse getStatus(
             Long eventId,
-            EntryStrategy strategy
+            EntryStrategy requestedStrategy
     ) {
 
         Event event =
@@ -42,21 +41,25 @@ public class EventStatusService {
                                         )
                         );
 
+        validateStrategy(
+                event,
+                requestedStrategy
+        );
+
         int currentCount;
         String countSource;
 
-        /*
-         * Redis 전략에서는 events.current_count를
-         * 사용하지 않는다.
-         *
-         * Redis의 event:capacity:{eventId}
-         * Counter가 현재 신청 인원의 기준이다.
-         */
-        if (strategy == EntryStrategy.REDIS) {
+        if (event.getStrategy() == EntryStrategy.REDIS) {
+
+            long redisCount =
+                    redisCapacityService
+                            .getCurrentCount(
+                                    eventId
+                            );
 
             currentCount =
-                    getRedisCurrentCount(
-                            eventId
+                    Math.toIntExact(
+                            redisCount
                     );
 
             countSource =
@@ -64,10 +67,6 @@ public class EventStatusService {
 
         } else {
 
-            /*
-             * Atomic / Pessimistic / Optimistic은
-             * MySQL events.current_count를 사용한다.
-             */
             currentCount =
                     event.getCurrentCount();
 
@@ -91,35 +90,20 @@ public class EventStatusService {
         );
     }
 
-    /*
-     * Redis 정원 Counter 조회
-     *
-     * Key:
-     * event:capacity:{eventId}
-     *
-     * 아직 Redis 전략으로 신청한 사용자가 없으면
-     * Key 자체가 없을 수 있기 때문에
-     * null인 경우 0으로 처리한다.
-     */
-    private int getRedisCurrentCount(
-            Long eventId
+    private void validateStrategy(
+            Event event,
+            EntryStrategy requestedStrategy
     ) {
-
-        String key =
-                REDIS_CAPACITY_KEY_PREFIX
-                        + eventId;
-
-        String value =
-                redisTemplate
-                        .opsForValue()
-                        .get(key);
-
-        if (value == null) {
-            return 0;
+        if (event.getStrategy() == requestedStrategy) {
+            return;
         }
 
-        return Integer.parseInt(
-                value
+        throw new BusinessException(
+                ErrorCode.STRATEGY_MISMATCH,
+                "이 이벤트는 "
+                        + event.getStrategy()
+                        + " 전략으로 생성되었습니다. 요청 전략="
+                        + requestedStrategy
         );
     }
 }

@@ -1,35 +1,35 @@
 const strategyMeta = {
 
     atomic: {
-        title: "Atomic Update",
+        title: "조건부 업데이트",
         short: "ATOMIC",
         description:
-            "조건부 UPDATE 한 번으로 정원을 확보합니다.",
-        tag: "DB",
+            "DB에서 정원 조건을 확인하면서 신청자 수를 한 번에 증가시킵니다.",
+        tag: "MYSQL",
     },
 
     pessimistic: {
-        title: "Pessimistic Lock",
+        title: "DB 잠금 방식",
         short: "PESSIMISTIC",
         description:
-            "행 잠금을 획득한 뒤 순차적으로 처리합니다.",
+            "이벤트 데이터를 잠근 뒤 요청을 순서대로 안전하게 처리합니다.",
         tag: "LOCK",
     },
 
     optimistic: {
-        title: "Optimistic Lock",
+        title: "버전 충돌 재시도",
         short: "OPTIMISTIC",
         description:
-            "Version 충돌을 감지하고 재시도합니다.",
+            "동시 수정을 버전으로 감지하고 충돌한 요청을 다시 시도합니다.",
         tag: "VERSION",
     },
 
     redis: {
-        title: "Redis + MySQL",
+        title: "Redis 선점 방식",
         short: "REDIS",
         description:
-            "Lua Script로 Redis Counter를 원자적으로 증가시킵니다.",
-        tag: "LUA",
+            "Redis에서 먼저 자리를 확보한 뒤 신청 정보를 DB에 저장합니다.",
+        tag: "REDIS",
     },
 };
 
@@ -37,10 +37,15 @@ function StrategyCard({
                           strategy,
                           selected,
                           onSelect,
+                          disabled = false,
                       }) {
 
     const meta =
         strategyMeta[strategy];
+
+    if (!meta) {
+        return null;
+    }
 
     return (
         <button
@@ -52,11 +57,15 @@ function StrategyCard({
                         : ""
                 }`
             }
+            disabled={disabled}
             onClick={
-                () =>
-                    onSelect(
-                        strategy
-                    )
+                () => {
+                    if (!disabled) {
+                        onSelect?.(
+                            strategy
+                        );
+                    }
+                }
             }
         >
 
@@ -97,9 +106,11 @@ function StrategyCard({
                 </span>
 
                 <span>
-                    {selected
-                        ? "현재 선택됨"
-                        : "이 전략으로 테스트"}
+                    {disabled
+                        ? "이 이벤트에 고정된 방식"
+                        : selected
+                            ? "현재 선택됨"
+                            : "이 방식으로 테스트"}
                 </span>
 
             </div>

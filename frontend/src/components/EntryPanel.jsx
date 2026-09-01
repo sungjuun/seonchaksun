@@ -4,53 +4,29 @@ import {
 
 import StrategyCard from "./StrategyCard";
 
-const strategies = [
-    "atomic",
-    "pessimistic",
-    "optimistic",
-    "redis",
-];
-
 function EntryPanel({
                         onSubmit,
                         loading,
                         result,
-                        onStrategyChange,
+                        strategy,
                     }) {
 
     const [userId, setUserId] =
         useState("1001");
-
-    const [strategy, setStrategy] =
-        useState("atomic");
-
-    function handleStrategyChange(
-        nextStrategy
-    ) {
-
-        setStrategy(
-            nextStrategy
-        );
-
-        onStrategyChange?.(
-            nextStrategy
-        );
-    }
 
     function handleSubmit(event) {
 
         event.preventDefault();
 
         if (
-            !userId ||
-            Number(userId) <= 0
+            !userId
+            || Number(userId) <= 0
         ) {
             return;
         }
 
         onSubmit({
             userId,
-            strategy,
         });
     }
 
@@ -66,7 +42,7 @@ function EntryPanel({
                     </span>
 
                     <h2>
-                        신청 전략 선택
+                        이벤트 처리 방식
                     </h2>
 
                 </div>
@@ -78,29 +54,17 @@ function EntryPanel({
             </div>
 
             <p className="event-subtitle">
-                동일한 이벤트에 서로 다른
-                동시성 제어 전략을 적용합니다.
+                이 이벤트는 생성할 때 선택한
+                동시성 처리 방식 하나만 사용합니다.
             </p>
 
-            <div className="strategy-grid">
+            <div className="strategy-grid strategy-grid-single">
 
-                {strategies.map(
-                    (item) => (
-
-                        <StrategyCard
-                            key={item}
-                            strategy={item}
-                            selected={
-                                strategy ===
-                                item
-                            }
-                            onSelect={
-                                handleStrategyChange
-                            }
-                        />
-
-                    )
-                )}
+                <StrategyCard
+                    strategy={strategy}
+                    selected
+                    disabled
+                />
 
             </div>
 
@@ -114,7 +78,7 @@ function EntryPanel({
                 <label className="entry-input-label">
 
                     <span>
-                        USER ID
+                        사용자 번호
                     </span>
 
                     <div className="entry-input-shell">
@@ -149,7 +113,7 @@ function EntryPanel({
 
                     <span>
                         {loading
-                            ? "처리 중..."
+                            ? "신청 처리 중..."
                             : "선착순 신청하기"}
                     </span>
 

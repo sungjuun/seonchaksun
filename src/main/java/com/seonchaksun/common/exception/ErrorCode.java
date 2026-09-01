@@ -10,6 +10,18 @@ public enum ErrorCode {
             "잘못된 이벤트 요청입니다."
     ),
 
+    INVALID_STRATEGY(
+            HttpStatus.BAD_REQUEST,
+            "INVALID_STRATEGY",
+            "지원하지 않는 신청 전략입니다."
+    ),
+
+    STRATEGY_MISMATCH(
+            HttpStatus.BAD_REQUEST,
+            "STRATEGY_MISMATCH",
+            "이 이벤트에 지정된 신청 전략과 요청 전략이 다릅니다."
+    ),
+
     EVENT_NOT_FOUND(
             HttpStatus.NOT_FOUND,
             "EVENT_NOT_FOUND",

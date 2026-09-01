@@ -1,5 +1,8 @@
 package com.seonchaksun.entry.service;
 
+import com.seonchaksun.common.exception.BusinessException;
+import com.seonchaksun.common.exception.ErrorCode;
+
 import java.util.Locale;
 
 public enum EntryStrategy {
@@ -14,7 +17,8 @@ public enum EntryStrategy {
     ) {
 
         if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(
+            throw new BusinessException(
+                    ErrorCode.INVALID_STRATEGY,
                     "신청 전략은 필수입니다."
             );
         }
@@ -33,7 +37,8 @@ public enum EntryStrategy {
                 IllegalArgumentException e
         ) {
 
-            throw new IllegalArgumentException(
+            throw new BusinessException(
+                    ErrorCode.INVALID_STRATEGY,
                     "지원하지 않는 신청 전략입니다: "
                             + value
             );

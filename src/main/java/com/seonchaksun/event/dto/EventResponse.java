@@ -1,5 +1,6 @@
 package com.seonchaksun.event.dto;
 
+import com.seonchaksun.entry.service.EntryStrategy;
 import com.seonchaksun.event.domain.Event;
 import io.swagger.v3.oas.annotations.media.Schema;
 
@@ -29,18 +30,16 @@ public record EventResponse(
         int capacity,
 
         @Schema(
-                description = """
-                        현재 신청 인원.
-
-                        Atomic, Pessimistic, Optimistic 전략에서는
-                        MySQL events.current_count 값입니다.
-
-                        Redis 전략의 신청 인원은 별도의
-                        status API에서 Redis Counter 기준으로 조회합니다.
-                        """,
+                description = "MySQL events.current_count 값",
                 example = "4"
         )
         int currentCount,
+
+        @Schema(
+                description = "이 이벤트에 고정된 동시성 처리 전략",
+                example = "ATOMIC"
+        )
+        EntryStrategy strategy,
 
         @Schema(
                 description = "신청 시작 시간",
@@ -65,8 +64,31 @@ public record EventResponse(
                 event.getName(),
                 event.getCapacity(),
                 event.getCurrentCount(),
+                event.getStrategy(),
                 event.getOpenAt(),
                 event.getCloseAt()
+        );
+    }
+
+    /*
+     * 기존 테스트 코드 호환용 생성자.
+     */
+    public EventResponse(
+            Long id,
+            String name,
+            int capacity,
+            int currentCount,
+            LocalDateTime openAt,
+            LocalDateTime closeAt
+    ) {
+        this(
+                id,
+                name,
+                capacity,
+                currentCount,
+                EntryStrategy.ATOMIC,
+                openAt,
+                closeAt
         );
     }
 }

@@ -1,17 +1,33 @@
 const BASE_URL = "http://localhost:8080";
 
+export async function createEvent(data) {
+    const response = await fetch(
+        `${BASE_URL}/api/events`,
+        {
+            method: "POST",
+            headers: {
+                "Content-Type":
+                    "application/json",
+            },
+            body: JSON.stringify(data),
+        }
+    );
+
+    return parseResponse(
+        response,
+        "이벤트를 생성하지 못했습니다."
+    );
+}
+
 export async function getEvent(eventId) {
     const response = await fetch(
         `${BASE_URL}/api/events/${eventId}`
     );
 
-    if (!response.ok) {
-        throw new Error(
-            "이벤트 정보를 불러오지 못했습니다."
-        );
-    }
-
-    return response.json();
+    return parseResponse(
+        response,
+        "이벤트 정보를 불러오지 못했습니다."
+    );
 }
 
 export async function getEventStatus(
@@ -22,13 +38,10 @@ export async function getEventStatus(
         `${BASE_URL}/api/events/${eventId}/status?strategy=${strategy}`
     );
 
-    if (!response.ok) {
-        throw new Error(
-            "이벤트 신청 현황을 불러오지 못했습니다."
-        );
-    }
-
-    return response.json();
+    return parseResponse(
+        response,
+        "이벤트 신청 현황을 불러오지 못했습니다."
+    );
 }
 
 export async function enterEvent(
@@ -51,6 +64,18 @@ export async function enterEvent(
         }
     );
 
+    return parseResponse(
+        response,
+        getDefaultErrorMessage(
+            response.status
+        )
+    );
+}
+
+async function parseResponse(
+    response,
+    fallbackMessage
+) {
     let body = null;
 
     try {
@@ -63,11 +88,9 @@ export async function enterEvent(
     if (!response.ok) {
         const error =
             new Error(
-                body?.message ||
-                body?.error ||
-                getDefaultErrorMessage(
-                    response.status
-                )
+                body?.message
+                || body?.error
+                || fallbackMessage
             );
 
         error.status =

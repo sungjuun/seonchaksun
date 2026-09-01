@@ -2262,3 +2262,90 @@ max-width: 680px
     gap: 10px;
   }
 }
+/* =========================
+   EVENT CREATE
+========================= */
+
+.create-card {
+  margin-bottom: 14px;
+  padding: 20px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border: 1px solid #e4e5e8;
+  border-radius: 16px;
+  background: #fff;
+}
+
+.create-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) 90px minmax(210px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.create-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.create-field > span {
+  color: #96989e;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.create-field input,
+.create-field select {
+  height: 38px;
+  padding: 0 11px;
+  border: 1px solid #dedfe3;
+  border-radius: 10px;
+  outline: 0;
+  background: #fafafa;
+  color: #1b1c20;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.create-button {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.strategy-grid-single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.strategy-card:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.strategy-card:disabled:hover {
+  transform: none;
+  border-color: #6669e9;
+}
+
+@media (max-width: 980px) {
+  .create-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .create-form {
+    grid-template-columns: 1fr 100px 1fr auto;
+  }
+}
+
+@media (max-width: 720px) {
+  .create-form {
+    grid-template-columns: 1fr;
+  }
+
+  .create-button {
+    min-height: 42px;
+  }
+}

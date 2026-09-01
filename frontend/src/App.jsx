@@ -7,6 +7,7 @@ import {
 import "./App.css";
 
 import {
+    createEvent,
     enterEvent,
     getEvent,
     getEventStatus,
@@ -14,28 +15,24 @@ import {
 
 import BenchmarkSection from "./components/BenchmarkSection";
 import EntryPanel from "./components/EntryPanel";
+import EventCreatePanel from "./components/EventCreatePanel";
 import EventStatus from "./components/EventStatus";
 
 function App() {
 
     const [eventId, setEventId] =
-        useState("15");
+        useState("");
 
     const [
         activeEventId,
         setActiveEventId,
-    ] = useState(15);
+    ] = useState(null);
 
     const [event, setEvent] =
         useState(null);
 
     const [status, setStatus] =
         useState(null);
-
-    const [
-        selectedStrategy,
-        setSelectedStrategy,
-    ] = useState("atomic");
 
     const [loading, setLoading] =
         useState(false);
@@ -55,6 +52,10 @@ function App() {
         useCallback(
             async (id) => {
 
+                if (!id) {
+                    return;
+                }
+
                 setEventLoading(true);
                 setError("");
 
@@ -65,10 +66,14 @@ function App() {
 
                     setEvent(data);
                     setActiveEventId(id);
+                    setEventId(
+                        String(id)
+                    );
 
                 } catch (error) {
 
                     setEvent(null);
+                    setStatus(null);
 
                     setError(
                         error.message
@@ -88,6 +93,10 @@ function App() {
                 id,
                 strategy
             ) => {
+
+                if (!id || !strategy) {
+                    return;
+                }
 
                 try {
 
@@ -114,6 +123,10 @@ function App() {
     useEffect(
         () => {
 
+            if (!activeEventId) {
+                return;
+            }
+
             loadEvent(
                 activeEventId
             );
@@ -128,23 +141,55 @@ function App() {
     useEffect(
         () => {
 
-            if (!event) {
+            if (!event || !activeEventId) {
                 return;
             }
 
             loadStatus(
                 activeEventId,
-                selectedStrategy
+                toStrategyPath(
+                    event.strategy
+                )
             );
 
         },
         [
             event,
             activeEventId,
-            selectedStrategy,
             loadStatus,
         ]
     );
+
+    async function handleEventCreate(
+        request
+    ) {
+        setEventLoading(true);
+        setError("");
+        setResult(null);
+
+        try {
+            const created =
+                await createEvent(
+                    request
+                );
+
+            setEvent(created);
+            setStatus(null);
+            setEventId(
+                String(created.id)
+            );
+            setActiveEventId(
+                created.id
+            );
+
+        } catch (error) {
+            setError(
+                error.message
+            );
+        } finally {
+            setEventLoading(false);
+        }
+    }
 
     function handleEventSearch(e) {
 
@@ -164,10 +209,14 @@ function App() {
 
             loadEvent(id);
 
-            loadStatus(
-                id,
-                selectedStrategy
-            );
+            if (event) {
+                loadStatus(
+                    id,
+                    toStrategyPath(
+                        event.strategy
+                    )
+                );
+            }
 
             return;
         }
@@ -178,8 +227,16 @@ function App() {
 
     async function handleEntry({
                                    userId,
-                                   strategy,
                                }) {
+
+        if (!event || !activeEventId) {
+            return;
+        }
+
+        const strategy =
+            toStrategyPath(
+                event.strategy
+            );
 
         setLoading(true);
         setResult(null);
@@ -233,7 +290,7 @@ function App() {
                             : "신청 실패",
 
                 message:
-                error.message,
+                    error.message,
 
                 elapsed,
             });
@@ -253,16 +310,12 @@ function App() {
         }
     }
 
-    function handleStrategyChange(
-        strategy
-    ) {
-
-        setSelectedStrategy(
-            strategy
-        );
-
-        setResult(null);
-    }
+    const activeStrategy =
+        event
+            ? toStrategyPath(
+                event.strategy
+            )
+            : null;
 
     return (
         <div className="app-shell">
@@ -284,7 +337,7 @@ function App() {
                             </strong>
 
                             <span>
-                                Concurrency Lab
+                                동시성 처리 테스트
                             </span>
 
                         </div>
@@ -295,14 +348,14 @@ function App() {
 
                         <div className="environment-badge">
                             <span className="environment-dot" />
-                            LOCAL
+                            로컬 환경
                         </div>
 
                         <a
                             href="#benchmark"
                             className="topbar-link"
                         >
-                            Benchmark
+                            성능 비교
                         </a>
 
                     </div>
@@ -322,13 +375,13 @@ function App() {
                         </span>
 
                         <h1>
-                            200명이 동시에 신청해도,
+                            200개의 신청 요청이 몰려도,
                             정확하게 100명만 받을 수 있을까?
                         </h1>
 
                         <p>
-                            같은 선착순 신청에 여러 동시성 제어 전략을 적용하고,
-                            정합성과 처리 성능이 어떻게 달라지는지 직접 비교했습니다.
+                            같은 선착순 문제를 여러 동시성 제어 전략으로 각각 구현하고,
+                            정합성과 처리 성능이 어떻게 달라지는지 비교했습니다.
                         </p>
 
                     </div>
@@ -338,11 +391,11 @@ function App() {
                         <div className="endpoint-header">
 
                             <span>
-                                ENTRY API
+                                신청 API
                             </span>
 
                             <span className="endpoint-status">
-                                Ready
+                                사용 가능
                             </span>
 
                         </div>
@@ -386,6 +439,15 @@ function App() {
 
                 </section>
 
+                <EventCreatePanel
+                    onCreate={
+                        handleEventCreate
+                    }
+                    loading={
+                        eventLoading
+                    }
+                />
+
                 <section className="selector-card">
 
                     <div className="selector-copy">
@@ -395,12 +457,12 @@ function App() {
                         </span>
 
                         <strong>
-                            테스트 이벤트 선택
+                            기존 테스트 이벤트 불러오기
                         </strong>
 
                         <p>
-                            Event ID를 입력해
-                            실제 데이터를 불러옵니다.
+                            이미 생성한 이벤트 번호가 있다면
+                            입력해서 다시 불러올 수 있습니다.
                         </p>
 
                     </div>
@@ -415,12 +477,13 @@ function App() {
                         <div className="input-shell">
 
                             <span>
-                                Event ID
+                                이벤트 번호
                             </span>
 
                             <input
                                 type="number"
                                 min="1"
+                                placeholder="예: 1"
                                 value={
                                     eventId
                                 }
@@ -448,7 +511,7 @@ function App() {
                 {eventLoading && (
 
                     <div className="state-card">
-                        이벤트 정보를 불러오고 있습니다.
+                        이벤트 정보를 처리하고 있습니다.
                     </div>
 
                 )}
@@ -461,8 +524,8 @@ function App() {
 
                 )}
 
-                {event &&
-                    !eventLoading && (
+                {event
+                    && !eventLoading && (
 
                         <section className="console-grid">
 
@@ -470,7 +533,7 @@ function App() {
                                 event={event}
                                 status={status}
                                 strategy={
-                                    selectedStrategy
+                                    activeStrategy
                                 }
                             />
 
@@ -484,8 +547,8 @@ function App() {
                                 result={
                                     result
                                 }
-                                onStrategyChange={
-                                    handleStrategyChange
+                                strategy={
+                                    activeStrategy
                                 }
                             />
 
@@ -511,8 +574,8 @@ function App() {
                     </strong>
 
                     <span>
-                        Backend Concurrency
-                        Portfolio Project
+                        백엔드 동시성
+                        포트폴리오 프로젝트
                     </span>
 
                 </div>
@@ -526,6 +589,13 @@ function App() {
 
         </div>
     );
+}
+
+function toStrategyPath(
+    strategy
+) {
+    return strategy
+        ?.toLowerCase();
 }
 
 export default App;

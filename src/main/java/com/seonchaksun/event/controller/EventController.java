@@ -45,9 +45,10 @@ public class EventController {
             description = """
                     새로운 선착순 이벤트를 생성합니다.
 
-                    이벤트 이름, 정원, 신청 시작 시간,
+                    이벤트 이름, 정원, 동시성 처리 전략, 신청 시작 시간,
                     신청 마감 시간을 입력합니다.
 
+                    하나의 이벤트에는 하나의 처리 전략이 고정됩니다.
                     시작 시간은 종료 시간보다 이전이어야 합니다.
                     """
     )
@@ -108,8 +109,11 @@ public class EventController {
     @Operation(
             summary = "전략별 신청 현황 조회",
             description = """
-                    선택한 동시성 제어 전략을 기준으로
+                    이벤트에 고정된 동시성 제어 전략을 기준으로
                     현재 신청 인원과 남은 정원을 조회합니다.
+
+                    요청한 strategy가 이벤트에 저장된 strategy와 다르면
+                    400 STRATEGY_MISMATCH를 반환합니다.
 
                     Atomic, Pessimistic, Optimistic 전략은
                     MySQL의 events.current_count를 기준으로 합니다.

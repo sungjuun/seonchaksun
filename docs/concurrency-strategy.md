@@ -1,305 +1,267 @@
-# 동시성 전략 설계 문서
+# Concurrency Strategy
 
-## 1. 문서 목적
+이 문서는 `선착순` 프로젝트에서 다룬 동시성 문제와 해결 전략을 기술적으로 정리한 문서입니다.
 
-이 문서는 `선착순` 프로젝트에서 동시성 문제를 어떻게 재현했고,
-어떤 전략을 적용했으며,
-각 전략이 어떤 특성과 한계를 보였는지를 기록하기 위한 기술 문서입니다.
-
-프로젝트의 목적은 특정 기술을 정답으로 선택하는 것이 아닙니다.
-
-다음 과정을 실제 코드와 테스트를 통해 반복했습니다.
-
-```text
-단순 구현
-→ 문제 재현
-→ 원인 분석
-→ 해결 전략 적용
-→ 정합성 검증
-→ 성능 측정
-→ 장애 발견
-→ 개선
-→ 재측정
-```
+프로젝트의 핵심 목표는 단순히 "정원 100명까지만 신청을 받는다"가 아니라, 높은 경합 상황에서 발생하는 동시성 문제를 직접 재현하고 여러 해결 전략의 특성과 한계를 비교하는 것입니다.
 
 ---
 
-# 2. 핵심 요구사항
+## 1. 문제 정의
 
-정원이 100명인 이벤트에 200개의 요청이 몰리더라도
-정확하게 100명만 신청에 성공해야 합니다.
+정원이 100명인 이벤트에 다수의 사용자가 동시에 신청한다고 가정합니다.
 
-```text
-요청 수 = 200
-정원 = 100
-
-성공 = 100
-정원 초과 실패 = 100
-실제 저장된 EventEntry = 100
-```
-
-또한 동일 사용자가 동시에 여러 번 신청하더라도
-최종적으로 한 번만 성공해야 합니다.
+가장 단순한 구현은 다음과 같습니다.
 
 ```text
-동일 사용자 20회 동시 요청
-
-→ 성공 = 1
-→ 중복 실패 = 19
-→ EventEntry = 1
-```
-
----
-
-## 2.1 핵심 불변식
-
-DB 기반 전략의 정합성 기준:
-
-```text
-Success
-==
-Event.currentCount
-==
-EventEntry count
-<=
-capacity
-```
-
-Redis 전략의 정합성 기준:
-
-```text
-Success
-==
-Redis count
-==
-EventEntry count
-<=
-capacity
-```
-
-Redis 전략에서는 `events.current_count`를 정원 기준으로 사용하지 않습니다.
-
----
-
-# 3. Naive 구현과 문제 재현
-
-최초 구현은 JPA Entity를 조회한 뒤
-애플리케이션에서 `currentCount`를 증가시키는 일반적인
-Read-Modify-Write 방식이었습니다.
-
-```text
-SELECT Event
-→ currentCount 확인
-→ currentCount + 1
+Event 조회
+→ 현재 신청자 수 확인
+→ 정원이 남아 있으면 currentCount 증가
 → EventEntry 저장
-→ Transaction Commit
 ```
+
+개념적으로:
+
+```java
+Event event = eventRepository.findById(eventId)
+        .orElseThrow();
+
+event.enter(now);
+
+eventEntryRepository.save(
+        new EventEntry(event, userId)
+);
+```
+
+단일 요청에서는 정상적으로 동작하지만 여러 트랜잭션이 동시에 같은 Event를 조회하면 문제가 발생할 수 있습니다.
+
+---
+
+## 2. Lost Update
+
+예를 들어 현재 신청자 수가 20명이라고 가정합니다.
+
+```text
+currentCount = 20
+```
+
+여러 요청이 동시에 조회하면:
+
+```text
+Thread A → 20 조회
+Thread B → 20 조회
+Thread C → 20 조회
+```
+
+각 요청은 독립적으로:
+
+```text
+20 + 1 = 21
+```
+
+을 계산합니다.
+
+결과적으로 실제 신청은 3건 발생했지만 최종 `currentCount`는 21이 될 수 있습니다.
+
+```text
+Expected
+currentCount = 23
+
+Actual
+currentCount = 21
+```
+
+이런 문제를 Lost Update라고 볼 수 있습니다.
+
+---
+
+## 3. Naive 구현을 통한 문제 재현
+
+동시성 제어를 적용하기 전에 가장 단순한 구현으로 문제를 재현했습니다.
 
 테스트 조건:
 
 ```text
-요청 Task = 200
-정원 = 100
-최대 Worker Thread = 32
+요청 수       : 200
+Event Capacity: 100
+Thread Pool    : 32
 ```
 
-결과:
+실제 테스트에서:
 
 ```text
-서비스 성공 수 = 40
-서비스 실패 수 = 160
+Success       : 40
+Failure       : 160
 
-Event.currentCount = 20
-EventEntry count = 40
+EventEntry    : 40
+currentCount  : 20
 ```
 
-실제 신청 데이터는 40건 저장되었지만
-이벤트 카운트는 20만 증가했습니다.
+과 같은 결과를 확인했습니다.
+
+신청 내역은 40건인데 Event의 `currentCount`는 20으로 기록되었습니다.
+
+즉 다음 invariant가 깨졌습니다.
+
+```text
+Event.currentCount == EventEntry count
+```
+
+이 결과를 기준으로 동시성 전략을 하나씩 적용했습니다.
 
 ---
 
-## 3.1 Lost Update
+# 4. 동시성 제어 전략
 
-여러 Transaction이 동시에 동일한 값을 읽었습니다.
-
-예를 들어:
+프로젝트에서는 다음 네 가지 전략을 구현했습니다.
 
 ```text
-Transaction A
-currentCount = 10 조회
-
-Transaction B
-currentCount = 10 조회
+1. Atomic Update
+2. Pessimistic Lock
+3. Optimistic Lock
+4. Redis Lua Script
 ```
 
-두 Transaction 모두 각각:
+모든 전략은 동일한 비즈니스 요구사항을 만족해야 합니다.
 
 ```text
-10 + 1 = 11
+capacity = 100
+
+200개의 신청 요청이 들어와도
+
+Success             = 100
+Business Failure    = 100
+Unexpected Failure  = 0
 ```
-
-을 저장하면 최종 결과는:
-
-```text
-11
-```
-
-입니다.
-
-실제로는 두 요청이 성공했으므로:
-
-```text
-12
-```
-
-가 되어야 합니다.
-
-즉 다른 Transaction의 변경 결과를 덮어쓰는
-**Lost Update**가 발생했습니다.
 
 ---
 
-## 3.2 Deadlock 관찰
+# 5. Atomic Update
 
-동시성 테스트 과정에서는 다음 MySQL 오류도 관찰했습니다.
+## 5.1 기본 아이디어
 
-```text
-MySQL Error 1213
-SQLState 40001
-Deadlock found when trying to get lock
-```
-
-다만 InnoDB Deadlock Graph를 별도로 수집하지 않았기 때문에
-정확히 어떤 Lock 순서와 쿼리 조합 때문에 발생했는지는 단정하지 않습니다.
-
-따라서 이 프로젝트에서는:
-
-```text
-Deadlock이 관찰되었다
-```
-
-까지만 기록합니다.
-
----
-
-# 4. Atomic Update
-
-## 4.1 설계
-
-정원 확인과 신청 인원 증가를 하나의 UPDATE Statement에서 처리합니다.
-
-현재 구현의 핵심 JPQL은 다음과 같습니다.
-
-```java
-@Modifying(
-    flushAutomatically = true,
-    clearAutomatically = true
-)
-@Query("""
-    UPDATE Event e
-    SET e.currentCount = e.currentCount + 1,
-        e.version = e.version + 1
-    WHERE e.id = :eventId
-      AND e.currentCount < e.capacity
-      AND e.openAt <= :now
-      AND e.closeAt > :now
-""")
-int incrementCurrentCount(
-        Long eventId,
-        LocalDateTime now
-);
-```
-
-기존:
+애플리케이션에서:
 
 ```text
 SELECT
-→ 조건 판단
+→ 정원 확인
 → UPDATE
 ```
 
-Atomic Update:
+를 나누어 처리하지 않고 DB가 하나의 UPDATE 문으로 정원 확인과 증가를 처리하도록 합니다.
 
-```text
-조건 판단 + UPDATE
-→ 단일 Statement
+개념적으로:
+
+```sql
+UPDATE events
+SET current_count = current_count + 1
+WHERE id = ?
+  AND current_count < capacity;
 ```
 
-DB가 직접 정원 조건을 확인하면서 값을 변경하도록 했습니다.
+UPDATE 결과:
+
+```text
+affected rows = 1
+→ 정원 확보 성공
+
+affected rows = 0
+→ 신청 불가능
+```
+
+이 방식에서는 여러 요청이 같은 값을 조회한 뒤 증가시키는 과정을 제거할 수 있습니다.
 
 ---
 
-## 4.2 왜 version도 직접 증가시키는가
+## 5.2 구현
 
-Entity에 `@Version`이 존재하지만 JPQL Bulk Update는
-일반적인 JPA Dirty Checking을 거치지 않습니다.
+```java
+@Modifying(
+        flushAutomatically = true,
+        clearAutomatically = true
+)
+@Query("""
+    UPDATE Event e
+       SET e.currentCount = e.currentCount + 1,
+           e.version = e.version + 1
+     WHERE e.id = :eventId
+       AND e.currentCount < e.capacity
+       AND e.openAt <= :now
+       AND e.closeAt > :now
+""")
+int incrementCurrentCount(
+        @Param("eventId") Long eventId,
+        @Param("now") LocalDateTime now
+);
+```
 
-따라서:
+Atomic Update 성공 후 `EventEntry`를 저장합니다.
 
 ```text
+Atomic UPDATE
+      ↓
+affected rows = 1
+      ↓
+EventEntry INSERT
+```
+
+---
+
+## 5.3 Version 직접 증가
+
+Event에는 Optimistic Lock 테스트를 위해 `@Version` 필드가 존재합니다.
+
+```java
 @Version
+private Long version;
 ```
 
-값 역시 자동으로 증가하지 않습니다.
+하지만 JPQL Bulk Update는 일반적인 JPA Dirty Checking을 우회합니다.
 
-현재 구현에서는 Bulk Update 쿼리 안에서:
+따라서 다음과 같이 version도 직접 증가시켰습니다.
 
-```text
-version = version + 1
+```java
+e.version = e.version + 1
 ```
-
-을 명시적으로 처리합니다.
 
 ---
 
-## 4.3 장점
+## 5.4 장점
 
-- 구조가 비교적 단순
-- 별도의 외부 인프라가 필요 없음
-- Lost Update 방지
-- Application Retry 불필요
-- DB가 원자적으로 정원 조건을 판별
+```text
+- 구현이 비교적 단순함
+- 별도의 SELECT FOR UPDATE가 필요하지 않음
+- 높은 경합에서도 안정적인 처리 가능
+- DB 한 곳에서 정합성 제어 가능
+```
 
 ---
 
-## 4.4 단점
-
-모든 성공 요청이 같은 Event row를 갱신합니다.
+## 5.5 단점 및 고려사항
 
 ```text
-events.id = 15
+- Bulk Update가 영속성 컨텍스트를 우회함
+- 실패 원인을 추가로 조회해야 할 수 있음
+- DB 조건식에 비즈니스 조건이 들어갈 수 있음
 ```
-
-하나에 수많은 쓰기가 집중되면:
-
-```text
-Hot Row Contention
-```
-
-이 발생할 수 있습니다.
-
-트래픽이 증가할수록 DB row 경합이 병목이 될 가능성이 있습니다.
 
 ---
 
-# 5. Pessimistic Lock
+# 6. Pessimistic Lock
 
-## 5.1 설계
+## 6.1 기본 아이디어
 
-Event 조회 시 `PESSIMISTIC_WRITE` Lock을 획득합니다.
+충돌이 발생할 것이라고 가정하고 Event Row에 쓰기 잠금을 획득합니다.
 
-```text
-SELECT Event FOR UPDATE
+개념적으로:
 
-→ Lock 획득
-→ 정원 확인
-→ Event 변경
-→ EventEntry 저장
-→ COMMIT
-→ Lock 해제
+```sql
+SELECT *
+FROM events
+WHERE id = ?
+FOR UPDATE;
 ```
 
-Repository에서는 JPA의:
+JPA에서는:
 
 ```java
 @Lock(LockModeType.PESSIMISTIC_WRITE)
@@ -309,311 +271,202 @@ Repository에서는 JPA의:
 
 ---
 
-## 5.2 특징
-
-먼저 Lock을 획득한 Transaction이 작업을 완료할 때까지
-다른 Transaction은 동일 row를 수정하지 못합니다.
-
-즉 충돌이 발생한 뒤 처리하는 것이 아니라
-충돌 자체를 사전에 직렬화합니다.
-
----
-
-## 5.3 장점
-
-- 동작이 직관적
-- 충돌을 사전에 차단
-- Retry 로직이 필요하지 않음
-- 높은 충돌 환경에서 안정적일 수 있음
-
----
-
-## 5.4 단점
-
-- Lock 대기 발생
-- Transaction 시간이 길어지면 대기 증가
-- DB Connection 점유 시간 증가 가능
-- Lock 범위와 Transaction 범위를 신중하게 관리해야 함
-
-이번 프로젝트에서는 Critical Section을 짧게 유지했습니다.
-
----
-
-# 6. Optimistic Lock
-
-## 6.1 설계
-
-Event Entity에:
-
-```java
-@Version
-```
-
-필드를 추가했습니다.
-
-처리 과정:
+## 6.2 처리 흐름
 
 ```text
-Event 조회
+Thread A
+→ Event Row Lock 획득
+→ 정원 확인
+→ currentCount 증가
+→ EventEntry 저장
+→ Commit
+→ Lock 해제
 
-↓
-
-비즈니스 로직 수행
-
-↓
-
-UPDATE
-WHERE id = ?
-AND version = ?
-
-↓
-
-version 불일치
-
-↓
-
-Optimistic Lock Exception
-
-↓
-
-Rollback
-
-↓
-
-Backoff
-
-↓
-
-Retry
+Thread B
+→ A의 Lock 해제까지 대기
+→ 처리
 ```
 
----
-
-## 6.2 Retry 구조
-
-한 Transaction 안에서 실패 후 계속 재시도하지 않습니다.
-
-별도 Transaction을 수행하는 Worker와
-Retry를 담당하는 Facade를 분리했습니다.
-
-```text
-Facade
-   ↓
-Worker
-   ↓
-새 Transaction
-```
-
-Retry 대상:
-
-```text
-ObjectOptimisticLockingFailureException
-CannotAcquireLockException
-```
-
-최대 Retry:
-
-```text
-100회
-```
-
-Random Backoff:
-
-```text
-1 ~ 5 ms
-```
-
-를 적용했습니다.
+동일 Event에 대한 신청은 사실상 순차적으로 처리됩니다.
 
 ---
 
 ## 6.3 장점
 
-- 충돌이 적으면 Lock 대기 없이 처리 가능
-- Read 비중이 높은 환경에서 유리할 수 있음
-- DB row를 장시간 Lock하지 않음
+```text
+- 데이터 정합성을 이해하기 쉬움
+- 충돌이 많은 환경에서도 명확하게 동작
+- Retry 로직이 필요하지 않음
+```
 
 ---
 
 ## 6.4 단점
 
-하나의 Event에 요청이 집중되면:
+```text
+- Lock Wait 발생
+- 긴 트랜잭션은 처리량 저하 가능
+- Deadlock 가능성 고려 필요
+```
+
+따라서 Pessimistic Lock에서는 트랜잭션 범위를 가능한 짧게 유지하는 것이 중요합니다.
+
+---
+
+# 7. Optimistic Lock
+
+## 7.1 기본 아이디어
+
+충돌이 적을 것이라고 가정하고 DB Row를 미리 잠그지 않습니다.
+
+대신 version 값을 이용해서 다른 트랜잭션이 먼저 데이터를 변경했는지 감지합니다.
+
+```java
+@Version
+private Long version;
+```
+
+예:
+
+```text
+currentCount = 20
+version      = 5
+```
+
+업데이트는 개념적으로:
+
+```sql
+UPDATE events
+SET current_count = 21,
+    version = 6
+WHERE id = ?
+  AND version = 5;
+```
+
+형태로 수행됩니다.
+
+---
+
+## 7.2 충돌 발생
+
+두 트랜잭션이 동시에:
+
+```text
+version = 5
+```
+
+를 조회했다고 가정합니다.
+
+첫 번째 요청:
+
+```text
+version 5 → 6
+성공
+```
+
+두 번째 요청:
+
+```text
+WHERE version = 5
+
+이미 DB version = 6
+
+→ UPDATE 실패
+→ Optimistic Lock 충돌
+```
+
+이 됩니다.
+
+---
+
+# 8. Optimistic Retry
+
+Optimistic Lock에서 충돌 자체는 정상적인 상황으로 볼 수 있습니다.
+
+따라서 프로젝트에서는 충돌 발생 시 Retry하도록 구현했습니다.
 
 ```text
 조회
-→ 수정
-→ 충돌
-→ Rollback
-→ Retry
+↓
+수정
+↓
+Optimistic Lock 충돌
+↓
+Backoff
+↓
+재조회
+↓
+Retry
 ```
 
-가 반복됩니다.
+현재 설정:
 
-따라서 높은 Hot Row Contention에서는
-Retry 비용이 크게 증가할 수 있습니다.
+```text
+MAX_RETRY = 100
+Backoff   = random 1~5ms
+```
 
-이번 실험에서도 네 전략 중 가장 높은 Tail Latency를 기록했습니다.
+Retry를 새로운 트랜잭션에서 수행하기 위해 Worker와 Retry Facade를 별도의 Spring Bean으로 분리했습니다.
 
 ---
 
-# 7. 중복 신청 Race Condition
+## 8.1 Retry를 별도 트랜잭션으로 처리한 이유
 
-동시성 제어를 정원에만 적용한다고 문제가 끝나지 않습니다.
+하나의 트랜잭션 내부에서 실패한 Entity 상태를 그대로 재사용하면 정상적인 재시도가 어려울 수 있습니다.
 
-다음 사전 검증이 존재한다고 가정합니다.
-
-```text
-existsByEventIdAndUserId(eventId, userId)
-```
-
-일반적으로:
+따라서:
 
 ```text
-exists
-→ false
-→ INSERT
+Retry Facade
+     ↓
+Worker
+     ↓
+새 Transaction
 ```
 
-를 수행할 수 있습니다.
-
-하지만 두 Transaction이 동시에 조회하면:
-
-```text
-Transaction A → false
-Transaction B → false
-```
-
-가 가능합니다.
-
-따라서 애플리케이션 레벨의 사전 조회만으로
-동시 중복 신청을 완전히 방지할 수 없습니다.
+구조로 구성했습니다.
 
 ---
 
-## 7.1 DB UNIQUE Constraint
+## 8.2 Optimistic Lock의 특징
 
-최종 불변식은 DB가 보장하도록 했습니다.
+Optimistic 방식에서는 대부분의 요청은 빠르게 처리될 수 있지만 충돌한 요청은 여러 번 재시도할 수 있습니다.
 
-```text
-UNIQUE(event_id, user_id)
-```
-
-즉:
+따라서:
 
 ```text
-Application validation
-+
-Database UNIQUE Constraint
+Median은 낮음
+
+하지만
+
+p95 / p99는 높아질 수 있음
 ```
 
-구조입니다.
+이라는 특징이 나타날 수 있습니다.
+
+실제 최종 테스트에서도 이 패턴이 확인되었습니다.
 
 ---
 
-## 7.2 saveAndFlush
+# 9. Redis Lua Script
 
-현재 구현에서는 단순:
+## 9.1 Redis를 선택한 이유
 
-```java
-save()
-```
+DB Row를 모든 요청이 경쟁하도록 하는 대신 정원 Counter를 Redis에서 관리합니다.
 
-가 아니라:
-
-```java
-saveAndFlush()
-```
-
-를 사용합니다.
-
-이유는 UNIQUE Constraint 위반을
-Service method가 종료된 이후가 아니라
-Service 내부에서 빠르게 확인하기 위해서입니다.
-
-이를 통해:
+Redis는 INCR 자체도 Atomic하지만 다음 로직 전체를 원자적으로 실행해야 합니다.
 
 ```text
-DataIntegrityViolationException
+현재 Counter 조회
+→ capacity 비교
+→ 증가
 ```
 
-을 서비스에서 감지하고:
-
-```text
-DuplicateEntryException
-```
-
-으로 변환합니다.
+따라서 Lua Script를 사용했습니다.
 
 ---
 
-## 7.3 동일 사용자 테스트 결과
-
-동일 사용자로 20개의 동시 요청을 보냈습니다.
-
-```text
-요청 = 20
-
-성공 = 1
-중복 실패 = 19
-예상하지 못한 실패 = 0
-```
-
-DB 기반 전략:
-
-```text
-Event.currentCount = 1
-EventEntry count = 1
-```
-
-Redis 전략:
-
-```text
-Redis count = 1
-EventEntry count = 1
-```
-
-을 확인했습니다.
-
----
-
-# 8. Redis Lua Script 전략
-
-## 8.1 왜 Distributed Lock이 아닌가
-
-이 프로젝트의 정원 처리 요구사항은 단순합니다.
-
-```text
-현재 신청자 수를 조회한다
-→ 정원이 남았는지 확인한다
-→ 남았다면 한 자리를 차지한다
-```
-
-이를 Redis로 표현하면:
-
-```text
-GET
-→ 비교
-→ INCR
-```
-
-입니다.
-
-이 연산을 위해 반드시:
-
-```text
-Lock 획득
-→ 처리
-→ Lock 해제
-```
-
-구조를 사용할 필요는 없다고 판단했습니다.
-
-Redis Lua Script를 사용하면
-조회 / 비교 / 증가를 하나의 원자적 연산으로 실행할 수 있습니다.
-
----
-
-## 8.2 Reserve Lua Script
+## 9.2 Reserve Script
 
 ```lua
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
@@ -628,941 +481,334 @@ redis.call('INCR', KEYS[1])
 return 1
 ```
 
-동작:
+Key:
 
 ```text
-현재 count 조회
-
-↓
-
-capacity 이상?
-
-YES
-→ 0 반환
-
-NO
-→ INCR
-→ 1 반환
+event:capacity:{eventId}
 ```
-
-Redis는 Lua Script를 원자적으로 실행하므로
-Script 실행 중 다른 요청이 중간에 끼어들지 않습니다.
-
----
-
-# 9. Redis 단독 정원 테스트
-
-Redis Counter 예약만 단독으로 테스트했습니다.
-
-```text
-요청 수 = 200
-정원 = 100
-Worker Thread = 32
-
-성공 = 100
-실패 = 100
-
-Redis count = 100
-
-처리 시간 = 398 ms
-```
-
-이 결과는 Redis 예약만 측정한 것이므로
-DB 기반 전략과 직접적인 성능 비교에는 사용하지 않습니다.
-
----
-
-# 10. Redis + MySQL 통합 전략
-
-Redis 전략에서는 역할을 분리했습니다.
-
-```text
-Redis
-→ 정원 Admission Control
-
-MySQL
-→ 실제 EventEntry 저장
-```
-
-신청 과정:
-
-```text
-Event 조회
-
-↓
-
-중복 사용자 사전 확인
-
-↓
-
-현재 시간 확인
-
-↓
-
-신청 기간 검증
-
-↓
-
-Redis reserve
-
-↓
-
-자리가 없으면 실패
-
-↓
-
-EventEntry saveAndFlush
-
-↓
-
-성공
-```
-
----
-
-## 10.1 Count Source
-
-Atomic / Pessimistic / Optimistic:
-
-```text
-events.current_count
-```
-
-Redis:
-
-```text
-Redis Counter
-```
-
-즉 Redis 전략에서는:
-
-```text
-events.current_count
-```
-
-를 증가시키지 않습니다.
-
-따라서 Redis 전략 정합성은:
-
-```text
-Redis count == EventEntry count
-```
-
-으로 확인합니다.
-
-React Demo UI에서도 선택한 전략에 따라:
-
-```text
-MYSQL
-REDIS
-```
-
-Count Source를 별도로 표시합니다.
-
----
-
-# 11. Redis + MySQL Dual Write
-
-Redis와 MySQL은 동일한 MySQL Transaction으로 묶이지 않습니다.
 
 예:
 
 ```text
-Redis reserve 성공
-
-0 → 1
-
-↓
-
-MySQL EventEntry INSERT 실패
-
-↓
-
-Redis Counter = 1
-EventEntry = 0
+event:capacity:45
 ```
-
-이 상태가 유지되면:
-
-```text
-실제 사용자보다 Redis count가 큼
-```
-
-이 되고 사용 가능한 정원이 잘못 감소합니다.
 
 ---
 
-# 12. Redis 보상 처리
+## 9.3 원자성
 
-DB 저장에 실패하면
-Redis에서 확보했던 자리를 반환합니다.
-
-```text
-Redis reserve
-
-↓
-
-DB saveAndFlush
-
-├─ 성공
-│   └─ 정상 종료
-│
-└─ 실패
-    ↓
-Redis release
-    ↓
-예외 반환
-```
-
-release 역시 Lua Script를 이용합니다.
-
-개념적으로:
-
-```text
-현재 count 조회
-→ 0보다 크면 DECR
-```
-
-합니다.
-
----
-
-## 12.1 DB 저장 실패 테스트
-
-Mock을 사용해 DB 저장 실패를 발생시켰습니다.
-
-```text
-Redis reserve 성공
-
-↓
-
-DB 저장 실패
-
-↓
-
-Redis release
-```
-
-최종 결과:
-
-```text
-Redis count = 0
-```
-
-을 확인했습니다.
-
----
-
-## 12.2 중복 요청과 Redis 보상
-
-동일 사용자가 동시에 20번 요청:
-
-```text
-성공 = 1
-중복 실패 = 19
-```
-
-DB UNIQUE Constraint에서 실패한 요청들은
-이미 확보한 Redis 정원을 다시 반환합니다.
-
-최종:
-
-```text
-Redis count = 1
-EventEntry count = 1
-```
-
-을 유지했습니다.
-
----
-
-# 13. Redis 보상 처리의 한계
-
-현재 구조에도 남아 있는 문제가 있습니다.
-
-Service 내부에서는:
-
-```java
-saveAndFlush()
-```
-
-까지 성공했지만
-실제 Transaction Commit은 Service method가 반환된 이후
-Spring Transaction Proxy에서 수행될 수 있습니다.
+Redis는 Lua Script 실행 중 다른 명령이 끼어들지 않습니다.
 
 따라서:
 
 ```text
-Redis reserve 성공
-
-↓
-
-saveAndFlush 성공
-
-↓
-
-Service 반환
-
-↓
-
-실제 DB COMMIT 실패
+GET
+→ capacity check
+→ INCR
 ```
 
-상황에서는 Service 내부 `catch`가
-실패를 감지하지 못할 가능성이 있습니다.
+전체를 하나의 원자적 작업처럼 실행할 수 있습니다.
 
 ---
 
-## 13.1 보상 자체가 실패하는 경우
+# 10. Redis + MySQL 구조
 
-다음 상황도 존재합니다.
-
-```text
-DB INSERT 실패
-
-↓
-
-Redis release 수행
-
-↓
-
-Redis 장애
-
-↓
-
-보상 실패
-```
-
-따라서 현재 Compensation은
-가능한 불일치를 줄이는 구조이지
-분산 트랜잭션을 완전히 해결하는 것은 아닙니다.
-
----
-
-## 13.2 향후 확장 가능성
-
-필요한 시스템이라면 다음 방식들을 검토할 수 있습니다.
+Redis 전략에서도 실제 신청 기록은 MySQL의 `EventEntry`에 저장합니다.
 
 ```text
-TransactionSynchronization
-Retry Queue
-Reconciliation
-Outbox Pattern
-주기적 Redis / DB 정합성 검사
-```
-
-XA / 2PC는 현재 프로젝트 요구사항에서는
-복잡도가 과도하다고 판단해 적용하지 않았습니다.
-
----
-
-# 14. Redis + MySQL 정원 동시성 검증
-
-서로 다른 사용자 200명이
-정원 100명 이벤트에 신청했습니다.
-
-```text
-요청 수 = 200
-정원 = 100
-Worker Thread = 32
-
-성공 = 100
-정원 초과 실패 = 100
-예상하지 못한 실패 = 0
-
-Redis count = 100
-EventEntry count = 100
-
-처리 시간 = 877 ms
-```
-
-정합성:
-
-```text
-Success
-==
-Redis count
-==
-EventEntry count
-==
-capacity
-```
-
-을 만족했습니다.
-
-단일 실행의 `877 ms` 값은
-Warm-up 및 실행 환경에 따른 편차가 있기 때문에
-최종 성능 비교 결과에는 사용하지 않았습니다.
-
----
-
-# 15. Integration Test 기준 성능 비교
-
-## 15.1 조건
-
-```text
-요청 Task = 200
-정원 = 100
-Worker Thread = 32
-전략별 반복 = 5회
-```
-
-각 회차마다 새로운 Event를 생성했습니다.
-
-측정과 함께:
-
-```text
-성공 수
-실패 수
-Count
-EventEntry
-```
-
-정합성도 함께 검증했습니다.
-
----
-
-## 15.2 결과
-
-| Strategy | Average | Min | Max |
-|---|---:|---:|---:|
-| Redis + MySQL | **183.40 ms** | 153 ms | 231 ms |
-| Pessimistic Lock | 670.60 ms | 634 ms | 759 ms |
-| Atomic Update | 683.60 ms | 568 ms | 920 ms |
-| Optimistic Lock | 1096.40 ms | 992 ms | 1196 ms |
-
----
-
-## 15.3 해석
-
-### Redis + MySQL
-
-이번 Integration Test에서는
-가장 짧은 처리 시간을 기록했습니다.
-
-DB 기반 전략에서는 성공 요청이 모두:
-
-```text
-events.current_count
-```
-
-라는 동일 row를 갱신합니다.
-
-Redis 전략에서는:
-
-```text
-정원 경쟁
-→ Redis Lua Script
-```
-
-로 이동시키고 MySQL에서는:
-
-```text
-서로 다른 EventEntry row INSERT
-```
-
-가 수행됩니다.
-
-Hot Row Write Contention 감소가
-결과에 영향을 준 것으로 판단합니다.
-
----
-
-### Atomic vs Pessimistic
-
-두 전략은 이번 조건에서는
-비슷한 평균 처리 시간을 기록했습니다.
-
-따라서:
-
-```text
-Pessimistic Lock은 항상 느리다
-```
-
-라고 결론 내리지 않습니다.
-
-Critical Section이 짧았기 때문에
-Lock을 명시적으로 사용하더라도
-대기 시간이 크게 증가하지 않은 것으로 해석합니다.
-
----
-
-### Optimistic
-
-높은 충돌 환경에서:
-
-```text
-Rollback
-Retry
-Backoff
-```
-
-비용이 누적되면서 가장 긴 처리 시간을 기록했습니다.
-
-Optimistic Lock 자체가 느리다는 의미가 아니라
-이번처럼 하나의 Hot Row에 쓰기가 집중되는 환경과
-잘 맞지 않았다고 판단합니다.
-
----
-
-# 16. Integration Test 결과의 한계
-
-Integration Test 결과는 HTTP 요청을 포함하지 않습니다.
-
-측정 범위에는:
-
-```text
-Spring Service
-Transaction
-JPA
-MySQL
 Redis
+→ 정원 확보
+
+MySQL
+→ 실제 신청 내역 저장
 ```
 
-등이 포함되지만 실제:
+따라서 Redis 전략의 처리 흐름은:
 
 ```text
-HTTP Controller
-JSON Serialization
-HTTP Connection
-Web Server
-```
-
-경로 전체를 측정하지는 않습니다.
-
-따라서 별도로 k6를 사용해
-실제 HTTP API 부하 테스트를 수행했습니다.
-
----
-
-# 17. k6 HTTP 부하 테스트
-
-## 17.1 목적
-
-다음 API를 실제 HTTP 요청으로 호출했습니다.
-
-```text
-POST /api/events/{eventId}/entries/strategies/{strategy}
-```
-
-각 동시성 전략을
-동일한 HTTP 경로에서 비교했습니다.
-
----
-
-## 17.2 테스트 구성
-
-k6 Executor:
-
-```text
-shared-iterations
-```
-
-조건:
-
-```text
-총 Iteration = 200
-VUs = 32
-Maximum Duration = 30s
-Event Capacity = 100
-```
-
-따라서 이 테스트는:
-
-```text
-200개의 요청이 정확히 동일한 순간에 발생
-```
-
-하는 테스트는 아닙니다.
-
-32개의 VU가 총 200개의 요청을 수행하는 구조입니다.
-
----
-
-## 17.3 User ID
-
-각 요청이 중복 사용자로 실패하지 않도록:
-
-```javascript
-exec.scenario.iterationInTest + 1
-```
-
-을 User ID로 사용했습니다.
-
-따라서:
-
-```text
-1
-2
-3
-...
-200
-```
-
-서로 다른 사용자가 요청합니다.
-
----
-
-## 17.4 응답 분류
-
-예상 가능한 HTTP Status:
-
-```text
-201 → 신청 성공
-400 → 정원 초과 등의 비즈니스 실패
-409 → 중복 신청
-```
-
-k6에서는 다음 Counter를 별도로 측정했습니다.
-
-```text
-success
-business_failure
-unexpected_failure
-```
-
-정상적인 정원 테스트의 목표:
-
-```text
-success = 100
-business_failure = 100
-unexpected_failure = 0
+Event 조회
+↓
+중복 신청 사전 검사
+↓
+신청 기간 검증
+↓
+Redis Lua Reserve
+↓
+EventEntry INSERT
+↓
+응답
 ```
 
 입니다.
 
 ---
 
-# 18. k6 HTTP 최종 결과
+## 10.1 Count Source
 
-| Strategy | Avg | p95 | p99 | Req/s | Unexpected |
-|---|---:|---:|---:|---:|---:|
-| **Redis + MySQL** | **30.89 ms** | **46.34 ms** | **50.10 ms** | **924.39** | 0 |
-| Pessimistic Lock | 118.94 ms | 200.29 ms | 221.20 ms | 257.87 | 0 |
-| Atomic Update | 123.38 ms | 230.27 ms | 269.33 ms | 247.34 | 0 |
-| Optimistic Lock | 163.45 ms | 588.31 ms | 659.14 ms | 191.93 | 0 |
+Redis 전략에서는 Redis Counter를 신청 수의 Source of Truth로 사용합니다.
 
-최종 테스트에서 모든 전략은:
+따라서:
 
 ```text
-Success = 100
-Business Failure = 100
-Unexpected Failure = 0
+events.current_count = 0
 ```
 
-을 만족했습니다.
+으로 유지합니다.
+
+정상적인 최종 상태:
+
+```text
+Redis Counter  = 100
+EventEntry     = 100
+```
+
+입니다.
+
+MySQL의 `events.current_count`는 Redis 전략에서는 신청 수 검증에 사용하지 않습니다.
 
 ---
 
-# 19. HTTP 결과 분석
+# 11. Redis 보상 처리
 
-## 19.1 Redis + MySQL
+Redis Reserve가 성공한 뒤 MySQL 저장이 실패할 수 있습니다.
 
-```text
-Avg = 30.89 ms
-p95 = 46.34 ms
-p99 = 50.10 ms
-Req/s = 924.39
-```
-
-네 전략 중 가장 낮은 응답시간과
-가장 높은 처리량을 기록했습니다.
-
-하지만 이 결과만으로:
+예:
 
 ```text
-Redis가 무조건 최선
+Redis Counter
+99 → 100
+
+↓
+
+EventEntry INSERT 실패
 ```
 
-이라고 판단하지 않습니다.
+이 상태를 그대로 두면 실제 신청은 99건인데 Redis는 100명으로 판단합니다.
 
-Redis를 도입하면:
+따라서 DB 저장 실패 시 Redis Counter를 감소시키는 보상 처리를 수행합니다.
 
 ```text
-추가 인프라
-Dual Write
-Compensation
-장애 복구
-정합성 Reconciliation
+Reserve
+↓
+DB INSERT 실패
+↓
+Release
 ```
-
-문제가 함께 생깁니다.
 
 ---
 
-## 19.2 Pessimistic Lock
+## 11.1 Release Script
 
-```text
-Avg = 118.94 ms
-p95 = 200.29 ms
-p99 = 221.20 ms
-Req/s = 257.87
+Counter가 0보다 클 경우에만 감소시킵니다.
+
+개념적으로:
+
+```lua
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+
+if current > 0 then
+    redis.call('DECR', KEYS[1])
+end
 ```
-
-Atomic Update와 비교했을 때
-현재 실험에서는 큰 차이가 나지 않았습니다.
-
-Lock 자체보다:
-
-```text
-Transaction 길이
-Critical Section 크기
-경합 정도
-```
-
-가 중요하다는 점을 확인했습니다.
 
 ---
 
-## 19.3 Atomic Update
+# 12. Redis Dual Write의 한계
 
-최종:
+현재 보상 방식만으로 Redis와 MySQL 사이의 완벽한 원자성을 보장할 수는 없습니다.
+
+예를 들어:
 
 ```text
-Avg = 123.38 ms
-p95 = 230.27 ms
-p99 = 269.33 ms
-Req/s = 247.34
+Redis Reserve 성공
+↓
+saveAndFlush 성공
+↓
+Service Method 정상 종료
+↓
+Transaction Commit 단계에서 실패
 ```
 
-외부 인프라 없이 비교적 단순한 구조로
-정합성을 보장할 수 있다는 장점이 있습니다.
+하는 경우를 생각할 수 있습니다.
 
-다만 부하 테스트 과정에서
-Atomic Update의 실패 처리 경로에서
-예상하지 못한 HTTP 500 문제가 발견되었습니다.
+`saveAndFlush()` 시점에는 성공했기 때문에 서비스 내부 `catch`에서 Redis Release를 수행하지 못할 수 있습니다.
 
-이 문제는 아래에서 별도로 설명합니다.
+또한:
+
+```text
+Redis Release 자체 실패
+```
+
+가능성도 존재합니다.
+
+따라서 Redis + MySQL 조합에서는 성능을 얻는 대신 분산 정합성 문제를 별도로 고려해야 합니다.
+
+향후 개선 방향:
+
+```text
+- TransactionSynchronization
+- Retry Queue
+- Reconciliation Job
+- Transactional Outbox
+```
+
+XA / 2PC는 현재 프로젝트 규모 대비 복잡도가 지나치게 크다고 판단하여 적용하지 않았습니다.
 
 ---
 
-## 19.4 Optimistic Lock
+# 13. 중복 신청 문제
 
-```text
-Avg = 163.45 ms
-p95 = 588.31 ms
-p99 = 659.14 ms
-Req/s = 191.93
+정원 제어만으로는 충분하지 않습니다.
+
+동일 사용자가 동시에 여러 번 신청할 수도 있습니다.
+
+애플리케이션에서:
+
+```java
+existsByEventIdAndUserId(...)
 ```
 
-특히:
-
-```text
-p95
-p99
-```
-
-Tail Latency가 크게 증가했습니다.
-
-많은 요청이 같은 Event row를 수정하면서
-Version 충돌이 반복되고:
-
-```text
-Rollback
-Retry
-Backoff
-```
-
-비용이 누적된 것으로 판단합니다.
+를 먼저 확인해도 Race Condition은 남아 있습니다.
 
 ---
 
-# 20. Atomic Update 부하 테스트 장애 발견
-
-초기 Atomic k6 테스트 결과는 다음과 같았습니다.
+## 13.1 Race Condition
 
 ```text
-Success = 100
-Business Failure = 91
-Unexpected Failure = 9
+Request A → 중복 신청 없음 확인
+Request B → 중복 신청 없음 확인
+
+A → INSERT
+B → INSERT
 ```
 
-정원이 100명이므로 정상이라면:
-
-```text
-100 성공
-100 비즈니스 실패
-0 예상하지 못한 실패
-```
-
-가 되어야 합니다.
-
-하지만 9건의 HTTP 500이 발생했습니다.
+두 요청 모두 중복 검사 시점에서는 신청 데이터가 존재하지 않을 수 있습니다.
 
 ---
 
-# 21. 서버 로그 분석
+## 13.2 DB UNIQUE Constraint
 
-서버 로그를 확인한 결과
-Deadlock이 직접적인 원인은 아니었습니다.
-
-발생 예외:
+따라서 DB를 최종 방어선으로 사용합니다.
 
 ```text
-IllegalStateException:
-이벤트 신청 실패 원인을 확인할 수 없습니다.
+UNIQUE(event_id, user_id)
 ```
 
-발생 위치:
+동일 사용자의 동시 신청 테스트 결과:
 
 ```text
-EventEntryService.throwEntryFailure(...)
+Concurrent Requests : 20
+
+Success              : 1
+Duplicate            : 19
+Unexpected           : 0
+
+Event Count          : 1
+EventEntry           : 1
 ```
 
-였습니다.
+을 확인했습니다.
+
+즉:
+
+```text
+Application Check
++
+Database UNIQUE Constraint
+```
+
+방식으로 중복 신청을 방어합니다.
 
 ---
 
-# 22. 기존 Atomic 실패 처리
+# 14. Atomic 전략의 MVCC 문제
 
-Atomic Update 결과가:
+프로젝트에서 가장 중요한 장애 분석 사례 중 하나입니다.
 
-```text
-updated = 1
-```
+Atomic 전략을 HTTP 부하 테스트하던 중 예상하지 못한 500 오류가 발생했습니다.
 
-이면 정원 확보 성공입니다.
-
-반대로:
+결과:
 
 ```text
-updated = 0
+Success             : 100
+Business Failure    : 91
+Unexpected Failure  : 9
 ```
 
-이면 다음 중 하나일 수 있습니다.
+---
 
-```text
-이벤트 없음
-신청 기간 아님
-정원 초과
-```
+## 14.1 초기 흐름
 
-따라서 기존 코드는 `updated == 0`이면
-Event를 다시 조회해 실패 원인을 판별했습니다.
+Atomic UPDATE가 0을 반환하면 신청이 실패했다는 의미입니다.
+
+이후 실패 원인을 확인하기 위해 Event를 다시 조회했습니다.
 
 ```text
 Atomic UPDATE
-
 ↓
-
-updated == 0
-
+affected rows = 0
 ↓
-
-findById(eventId)
-
+Event SELECT
 ↓
-
-Event 상태 확인
-
-↓
-
-적절한 비즈니스 예외 발생
+실패 이유 판단
 ```
 
-그러나 일부 요청에서는
-어떤 비즈니스 조건에도 해당하지 않는 상태가 나타났고:
-
-```text
-IllegalStateException
-```
-
-으로 이어졌습니다.
+문제는 이 SELECT였습니다.
 
 ---
 
-# 23. MySQL REPEATABLE READ와 Snapshot
+## 14.2 MySQL REPEATABLE_READ와 MVCC
 
-MySQL의 Transaction Isolation Level은:
+MySQL의 기본 Transaction Isolation Level은:
 
 ```text
 REPEATABLE_READ
 ```
 
-였습니다.
+입니다.
 
-Atomic UPDATE는 일반적인 Consistent Read와 다르게
-현재 최신 row 상태를 기준으로 조건을 평가할 수 있습니다.
+Atomic UPDATE는 현재 최신 Row를 기준으로 조건을 평가합니다.
 
-반면 같은 Transaction에서 이후 수행된 일반 SELECT는
-기존 Consistent Read Snapshot을 볼 수 있습니다.
+예를 들어 실제 DB:
+
+```text
+current_count = 100
+capacity      = 100
+```
+
+이면:
+
+```sql
+current_count < capacity
+```
+
+조건이 false이므로 UPDATE 결과는 0입니다.
+
+하지만 같은 트랜잭션에서 수행한 일반 SELECT는 MVCC Snapshot을 사용하면서 이전 값을 볼 수 있습니다.
+
+예:
+
+```text
+Atomic UPDATE가 확인한 값 = 100
+
+일반 SELECT가 본 Snapshot = 95
+```
+
+이 경우 애플리케이션은:
+
+```text
+95 < 100
+```
+
+으로 판단해서 capacity 초과 예외를 발생시키지 못합니다.
+
+최종적으로 fallback `IllegalStateException`이 발생하면서 HTTP 500으로 응답했습니다.
 
 ---
 
-## 23.1 발생 가능한 흐름
+# 15. clearAutomatically가 해결하지 못한 이유
 
-실제 최신 DB:
-
-```text
-currentCount = 100
-capacity = 100
-```
-
-Atomic UPDATE:
-
-```text
-WHERE currentCount < capacity
-```
-
-조건이 false이므로:
-
-```text
-updated = 0
-```
-
-이 됩니다.
-
-여기까지는 정상입니다.
-
-하지만 이후 실패 원인을 확인하는:
-
-```text
-findById()
-```
-
-일반 SELECT가 이전 Snapshot을 조회한다고 가정하면:
-
-```text
-currentCount = 95
-capacity = 100
-```
-
-처럼 보일 수 있습니다.
-
-그러면 애플리케이션에서는:
-
-```text
-이벤트 존재함
-신청 기간 정상
-정원도 남아 있음
-```
-
-으로 판단합니다.
-
-결과적으로:
-
-```text
-Atomic UPDATE는 실패했는데
-실패 원인을 찾을 수 없음
-```
-
-상태가 됩니다.
-
-마지막 fallback:
-
-```java
-throw new IllegalStateException(
-    "이벤트 신청 실패 원인을 확인할 수 없습니다."
-);
-```
-
-가 실행되면서 HTTP 500이 발생했습니다.
-
----
-
-# 24. Persistence Context Clear와 MVCC Snapshot
-
-Atomic Repository에는:
+Atomic Update에는:
 
 ```java
 clearAutomatically = true
@@ -1570,309 +816,453 @@ clearAutomatically = true
 
 가 적용되어 있습니다.
 
-이 옵션은 Bulk Update 이후
-JPA Persistence Context를 비워
-Entity의 stale state 문제를 줄이는 데 도움이 됩니다.
-
-하지만:
+하지만 이것은 JPA Persistence Context를 clear하는 기능입니다.
 
 ```text
-JPA Persistence Context
+Persistence Context Clear
+≠
+MySQL MVCC Snapshot Reset
 ```
 
-와:
-
-```text
-MySQL Transaction MVCC Snapshot
-```
-
-은 다른 개념입니다.
-
-Persistence Context를 clear했다고 해서
-DB Transaction의 Consistent Read Snapshot 자체가
-새로 만들어지는 것은 아닙니다.
-
-따라서 이 문제를:
-
-```text
-JPA Cache 문제
-```
-
-로만 해석해서는 안 된다고 판단했습니다.
+즉 Entity Cache를 지운다고 해서 현재 트랜잭션의 DB Snapshot 자체가 바뀌는 것은 아닙니다.
 
 ---
 
-# 25. Atomic Update 실패 경로 개선
+# 16. Atomic MVCC 문제 해결
 
-실패 원인을 판별할 때
-일반 SELECT 대신 Locking Read를 사용하도록 변경했습니다.
-
-기존:
-
-```text
-findById(eventId)
-```
-
-개선:
-
-```text
-findByIdWithPessimisticLock(eventId)
-```
-
-Repository:
+실패 원인을 판단하는 조회만 Locking Read로 변경했습니다.
 
 ```java
 @Lock(LockModeType.PESSIMISTIC_WRITE)
 @Query("""
     SELECT e
-    FROM Event e
-    WHERE e.id = :eventId
+      FROM Event e
+     WHERE e.id = :eventId
 """)
 Optional<Event> findByIdWithPessimisticLock(
-        Long eventId
+        @Param("eventId") Long eventId
 );
 ```
 
-Locking Read를 통해
-실패 판별 시 최신 row 상태를 기준으로 확인하도록 변경했습니다.
+Locking Read는 현재 Row를 기준으로 조회하므로 최신 상태를 확인할 수 있습니다.
 
 ---
 
-# 26. Atomic 전략이 Pessimistic으로 바뀐 것은 아니다
+## 16.1 중요한 설계 포인트
 
-중요한 점은 Pessimistic Lock을 사용하는 곳이:
+Atomic 전략 전체를 Pessimistic Lock 방식으로 변경한 것은 아닙니다.
 
-```text
-Atomic Update가 실패한 뒤
-실패 원인을 판별하는 경로
-```
-
-뿐이라는 것입니다.
-
-정상 신청 처리:
+정상적인 신청 흐름:
 
 ```text
-Atomic Conditional UPDATE
+Atomic UPDATE
 ```
 
-는 그대로 유지됩니다.
+는 그대로 유지합니다.
 
-즉 전체 Atomic 전략을:
+오직:
 
 ```text
-Pessimistic Lock 전략
+Atomic UPDATE 실패 후
+실패 이유를 확인하는 조회
 ```
 
-으로 변경한 것이 아닙니다.
+에만 Locking Read를 사용했습니다.
+
+수정 후:
+
+```text
+Success             : 100
+Business Failure    : 100
+Unexpected Failure  : 0
+```
+
+으로 정상화되었습니다.
 
 ---
 
-# 27. Atomic 장애 개선 전 / 후
+# 17. 정확성 검증 기준
 
-## Before
+모든 전략에서 가장 먼저 확인한 것은 성능이 아니라 정확성입니다.
 
-```text
-Success = 100
-Business Failure = 91
-Unexpected Failure = 9
-```
-
-HTTP 500:
+이벤트:
 
 ```text
-9건
+capacity = 100
 ```
+
+요청:
+
+```text
+200
+```
+
+정상 결과:
+
+```text
+Success             = 100
+Business Failure    = 100
+Unexpected Failure  = 0
+```
+
+DB 기반 전략:
+
+```text
+Event.currentCount = 100
+EventEntry          = 100
+```
+
+Redis 전략:
+
+```text
+Redis Counter       = 100
+EventEntry          = 100
+```
+
+정확성을 만족하지 못한 성능 결과는 유효한 Benchmark로 사용하지 않습니다.
 
 ---
 
-## After
+# 18. k6 HTTP Benchmark
+
+통합 테스트뿐 아니라 실제 HTTP 레이어까지 포함한 성능 비교를 위해 k6를 사용했습니다.
+
+테스트 설정:
 
 ```text
-Success = 100
-Business Failure = 100
-Unexpected Failure = 0
+Scenario       : shared-iterations
+VUs            : 32
+Iterations     : 200
+Capacity       : 100
 ```
 
-최종 성능:
-
-```text
-Avg = 123.38 ms
-p95 = 230.27 ms
-p99 = 269.33 ms
-Req/s = 247.34
-```
+모든 전략에 동일한 조건을 적용했습니다.
 
 ---
 
-# 28. Atomic 장애에서 얻은 점
-
-이번 문제는 단순 Unit Test나 Integration Test만으로는
-발견하지 못했습니다.
-
-실제 HTTP 부하 테스트를 수행하면서:
+## 18.1 기대 HTTP 결과
 
 ```text
-부하 테스트
-
-↓
-
-예상하지 못한 HTTP 500 발견
-
-↓
-
-Server Stack Trace 확인
-
-↓
-
-실패 발생 위치 확인
-
-↓
-
-Transaction Isolation 확인
-
-↓
-
-REPEATABLE READ / MVCC 분석
-
-↓
-
-일반 SELECT와 Locking Read 차이 확인
-
-↓
-
-실패 판별 경로 수정
-
-↓
-
-k6 재실행
-
-↓
-
-Unexpected Failure
-9 → 0
+100 Success
+100 Business Failure
+0 Unexpected Failure
 ```
 
-과정을 거쳤습니다.
+`201`, 예상 가능한 `400 / 409`는 테스트상 정상적인 응답으로 처리합니다.
 
-이 프로젝트에서 성능 수치보다
-더 의미 있었던 실험 중 하나였습니다.
+따라서:
+
+```text
+http_req_failed = 0%
+```
+
+이 정상입니다.
 
 ---
 
-# 29. 성능 수치를 해석할 때의 제한사항
+## 18.2 동시성 표현에 대한 주의
 
-현재 측정은 로컬 개발 환경에서 수행했습니다.
-
-따라서 다음 환경까지 포함한
-운영 환경 벤치마크는 아닙니다.
-
-```text
-다중 Application Instance
-실제 Network Latency
-운영 수준의 MySQL Cluster
-Redis Cluster
-Load Balancer
-Container Resource Limit
-Cloud 환경
-```
-
-또한 k6의:
+현재 k6 테스트는:
 
 ```text
 32 VUs
 200 shared iterations
 ```
 
-은 200개 요청이 물리적으로 정확히 같은 시각에
-시작된다는 의미가 아닙니다.
+입니다.
 
-따라서 측정값은:
+따라서 정확히 200개의 요청이 동일한 순간에 시작하는 테스트라고 표현하지 않습니다.
+
+문서에서는:
+
+> 32 VUs가 200개의 요청을 shared-iterations 방식으로 수행했다.
+
+라고 표현합니다.
+
+---
+
+# 19. Warm-up
+
+초기 수동 반복 테스트에서는 대부분의 전략이 Run이 반복될수록 빨라지는 경향을 보였습니다.
+
+특히 Redis에서는 첫 실행과 이후 실행 사이의 차이가 컸습니다.
+
+가능한 원인:
 
 ```text
-절대적인 성능 수치
+- JVM JIT
+- Connection Pool
+- Redis Client Connection
+- DB Buffer / Cache
+- 애플리케이션 초기화 비용
 ```
 
-가 아니라:
+따라서 최종 Benchmark에서는:
 
 ```text
-동일한 로컬 조건에서
-각 전략의 상대적 특성을 비교한 결과
+Warm-up 1회
+→ 결과 제외
+
+Measured Runs 5회
+→ 평균 사용
 ```
 
-로 해석합니다.
+방식으로 변경했습니다.
+
+매 회차 새로운 Event를 생성했습니다.
 
 ---
 
-# 30. 전략별 비교 정리
+# 20. Benchmark Automation
 
-| 전략 | 장점 | 단점 | 이번 실험에서 관찰한 특징 |
-|---|---|---|---|
-| Atomic Update | 단순, 외부 인프라 없음 | Hot Row 경합 | 구현/운영 복잡도 대비 안정적 |
-| Pessimistic Lock | 직관적, 충돌 사전 차단 | Lock 대기 | 짧은 Critical Section에서는 Atomic과 유사 |
-| Optimistic Lock | 충돌 적을 때 효율적 | Retry 비용 | Hot Row 환경에서 Tail Latency 증가 |
-| Redis + MySQL | 높은 처리량, DB 정원 경합 감소 | Dual Write, 운영 복잡도 | 현재 로컬 테스트에서 가장 높은 처리량 |
-
----
-
-# 31. 현재 결론
-
-## 31.1 Naive Read-Modify-Write
-
-높은 동시성 환경에서는
-Lost Update가 발생할 수 있었습니다.
+반복 테스트를 수동으로 수행하지 않도록 PowerShell Script를 추가했습니다.
 
 ```text
-조회
-→ 판단
-→ 변경
+scripts/benchmark.ps1
 ```
 
-이 분리되어 있기 때문입니다.
+사용 예:
 
----
+```powershell
+.\scripts\benchmark.ps1 -Strategy atomic
+```
 
-## 31.2 Atomic Update
-
-외부 인프라 없이
-비교적 단순한 구조로 정합성을 확보할 수 있었습니다.
-
-하지만 동일 Event row에 쓰기가 집중되는
-Hot Row 구조라는 특성은 남습니다.
-
----
-
-## 31.3 Pessimistic Lock
-
-Lock이라는 이유만으로
-항상 성능이 나쁘다고 볼 수 없었습니다.
-
-이번처럼 Transaction과 Critical Section이 짧다면
-충돌이 많은 환경에서도 실용적인 선택이 될 수 있습니다.
-
----
-
-## 31.4 Optimistic Lock
-
-충돌이 적은 환경에서는 장점이 있지만
-하나의 Event row에 요청이 집중되면:
+지원 전략:
 
 ```text
-Version Conflict
-Retry
-Rollback
-Backoff
+atomic
+pessimistic
+optimistic
+redis
 ```
 
-비용이 크게 증가할 수 있었습니다.
+자동화 흐름:
+
+```text
+Event 생성
+↓
+Warm-up 1회
+↓
+10초 대기
+↓
+Measured Run 1
+↓
+10초
+↓
+...
+↓
+Measured Run 5
+```
 
 ---
 
-## 31.5 Redis
+# 21. Final Benchmark Result
 
-정원 경쟁을 Redis Lua Script로 이동시키면서
-이번 실험에서는 가장 높은 처리량을 기록했습니다.
+테스트 조건:
 
-하지만:
+```text
+Event Capacity : 100
+Requests       : 200
+VUs            : 32
+
+Warm-up        : 1
+Measured Runs  : 5
+```
+
+모든 최종 측정 회차에서:
+
+```text
+Success             = 100
+Business Failure    = 100
+Unexpected Failure  = 0
+```
+
+을 만족했습니다.
+
+---
+
+## 21.1 Atomic
+
+| Run | Avg | p95 | p99 | Max | Req/s |
+|---|---:|---:|---:|---:|---:|
+| 1 | 97.78 ms | 144.27 ms | 146.10 ms | 146.37 ms | 309.95 |
+| 2 | 83.39 ms | 134.48 ms | 135.25 ms | 141.27 ms | 362.17 |
+| 3 | 81.09 ms | 126.98 ms | 129.36 ms | 136.76 ms | 371.51 |
+| 4 | 75.08 ms | 118.96 ms | 119.81 ms | 124.45 ms | 402.71 |
+| 5 | 74.65 ms | 120.05 ms | 120.84 ms | 125.61 ms | 406.01 |
+
+평균:
+
+```text
+Avg   = 82.40 ms
+p95   = 128.95 ms
+p99   = 130.27 ms
+Max   = 134.89 ms
+Req/s = 370.47
+```
+
+---
+
+## 21.2 Pessimistic
+
+| Run | Avg | p95 | p99 | Max | Req/s |
+|---|---:|---:|---:|---:|---:|
+| 1 | 81.42 ms | 138.45 ms | 139.51 ms | 148.87 ms | 374.34 |
+| 2 | 79.73 ms | 142.74 ms | 143.91 ms | 144.25 ms | 381.66 |
+| 3 | 81.05 ms | 146.65 ms | 147.54 ms | 148.54 ms | 376.25 |
+| 4 | 76.44 ms | 131.09 ms | 132.71 ms | 136.66 ms | 396.87 |
+| 5 | 76.72 ms | 133.09 ms | 134.96 ms | 135.47 ms | 397.46 |
+
+평균:
+
+```text
+Avg   = 79.07 ms
+p95   = 138.40 ms
+p99   = 139.73 ms
+Max   = 142.76 ms
+Req/s = 385.32
+```
+
+---
+
+## 21.3 Optimistic
+
+| Run | Avg | p95 | p99 | Max | Req/s |
+|---|---:|---:|---:|---:|---:|
+| 1 | 115.19 ms | 409.83 ms | 579.69 ms | 651.54 ms | 270.93 |
+| 2 | 109.21 ms | 364.34 ms | 475.04 ms | 600.81 ms | 286.11 |
+| 3 | 102.80 ms | 327.40 ms | 460.84 ms | 561.14 ms | 302.01 |
+| 4 | 111.49 ms | 390.65 ms | 671.49 ms | 673.19 ms | 280.09 |
+| 5 | 91.97 ms | 343.59 ms | 548.88 ms | 550.93 ms | 338.14 |
+
+평균:
+
+```text
+Avg   = 106.13 ms
+p95   = 367.16 ms
+p99   = 547.19 ms
+Max   = 607.52 ms
+Req/s = 295.46
+```
+
+---
+
+## 21.4 Redis
+
+| Run | Avg | p95 | p99 | Max | Req/s |
+|---|---:|---:|---:|---:|---:|
+| 1 | 19.93 ms | 28.62 ms | 31.36 ms | 44.59 ms | 1394.46 |
+| 2 | 20.84 ms | 30.27 ms | 44.91 ms | 50.38 ms | 1349.40 |
+| 3 | 18.91 ms | 28.49 ms | 29.81 ms | 38.35 ms | 1485.47 |
+| 4 | 18.96 ms | 27.29 ms | 38.77 ms | 39.07 ms | 1473.18 |
+| 5 | 22.83 ms | 37.15 ms | 39.96 ms | 48.20 ms | 1249.43 |
+
+평균:
+
+```text
+Avg   = 20.29 ms
+p95   = 30.36 ms
+p99   = 36.96 ms
+Max   = 44.12 ms
+Req/s = 1390.39
+```
+
+---
+
+# 22. Final Comparison
+
+| Strategy | Avg | p95 | p99 | Req/s |
+|---|---:|---:|---:|---:|
+| Atomic | 82.40 ms | 128.95 ms | 130.27 ms | 370.47 |
+| Pessimistic | 79.07 ms | 138.40 ms | 139.73 ms | 385.32 |
+| Optimistic | 106.13 ms | 367.16 ms | 547.19 ms | 295.46 |
+| Redis | **20.29 ms** | **30.36 ms** | **36.96 ms** | **1390.39** |
+
+---
+
+# 23. 결과 분석
+
+## Atomic
+
+Atomic은 명시적인 Row Lock 없이도 안정적인 성능을 보였습니다.
+
+특히:
+
+```text
+p95 = 128.95 ms
+p99 = 130.27 ms
+```
+
+로 MySQL 기반 전략 중 가장 낮은 Tail Latency를 기록했습니다.
+
+구현 복잡도와 성능 사이의 균형이 좋은 방식이라고 판단했습니다.
+
+---
+
+## Pessimistic
+
+이번 환경에서는 MySQL 기반 전략 중:
+
+```text
+Avg
+Req/s
+```
+
+가 가장 좋았습니다.
+
+```text
+Avg   = 79.07 ms
+Req/s = 385.32
+```
+
+Atomic과 큰 차이는 아니었습니다.
+
+높은 경합에서는 요청을 Lock으로 직렬화하는 방식이 오히려 안정적으로 동작할 수 있음을 확인했습니다.
+
+---
+
+## Optimistic
+
+Optimistic은 가장 명확하게 Tail Latency 증가가 나타났습니다.
+
+```text
+Avg = 106.13 ms
+
+p95 = 367.16 ms
+p99 = 547.19 ms
+```
+
+평균 응답시간과 비교했을 때 p95/p99가 크게 증가했습니다.
+
+이는 높은 경합에서 Optimistic Lock 충돌이 반복되고 Retry 비용이 일부 요청에 집중되기 때문이라고 해석할 수 있습니다.
+
+따라서 선착순 시스템처럼 특정 Row에 요청이 집중되는 환경에서는 Optimistic Lock이 반드시 가장 효율적인 방식이라고 볼 수 없습니다.
+
+---
+
+## Redis
+
+현재 Benchmark 조건에서는 Redis가:
+
+```text
+Avg
+p95
+p99
+Req/s
+```
+
+모두 가장 좋은 결과를 기록했습니다.
+
+```text
+Avg   = 20.29 ms
+p95   = 30.36 ms
+p99   = 36.96 ms
+Req/s = 1390.39
+```
+
+DB Row의 동일 Counter를 계속 수정하는 대신 Redis에서 Lua Script로 Counter를 관리한 것이 큰 차이를 만들었습니다.
+
+하지만 Redis를 도입하면서:
 
 ```text
 Redis
@@ -1880,152 +1270,319 @@ Redis
 MySQL
 ```
 
-두 데이터 저장소를 함께 사용하면서
-Dual Write라는 새로운 문제가 생겼습니다.
+두 저장소 사이의 정합성 문제가 새롭게 발생합니다.
 
-따라서:
-
-```text
-성능 향상
-=
-복잡도 감소
-```
-
-가 아니라는 점을 확인했습니다.
+따라서 Redis 전략은 성능 측면에서는 유리하지만 운영 복잡도와 장애 복구 전략까지 함께 고려해야 합니다.
 
 ---
 
-## 31.6 DB Constraint
+# 24. 전략별 적합한 상황
 
-동시성 환경에서는:
+## Atomic Update
 
-```text
-사전 조회
-```
-
-만으로 중복을 완전히 막을 수 없습니다.
-
-최종 불변식은:
+적합한 경우:
 
 ```text
-UNIQUE(event_id, user_id)
+- 단일 DB 중심 시스템
+- 단순한 Counter 조건
+- 구현 복잡도를 낮추고 싶음
+- 높은 경합에서도 안정적인 Tail Latency 필요
 ```
-
-DB Constraint로 보장했습니다.
 
 ---
 
-## 31.7 부하 테스트
+## Pessimistic Lock
 
-부하 테스트는 단순히:
-
-```text
-누가 몇 ms 빠른가
-```
-
-를 비교하기 위한 용도로만 사용하지 않았습니다.
-
-실제 Atomic Update의 HTTP 500 문제를 발견하고:
+적합한 경우:
 
 ```text
-MySQL REPEATABLE READ
-MVCC
-Consistent Read
-Locking Read
+- 충돌이 빈번함
+- 데이터 정합성이 매우 중요함
+- Row Lock 대기를 허용할 수 있음
 ```
-
-까지 분석하는 계기가 되었습니다.
 
 ---
 
-# 32. 최종적으로 동시성 전략을 선택할 때
+## Optimistic Lock
 
-이번 프로젝트의 결론은:
-
-```text
-Redis가 가장 빠르니 Redis를 사용한다
-```
-
-가 아닙니다.
-
-실제 선택에서는 다음을 함께 고려해야 합니다.
+적합한 경우:
 
 ```text
-정합성 요구사항
-
-트래픽 크기
-
-경합 빈도
-
-Hot Row 여부
-
-Transaction 길이
-
-외부 인프라 운영 비용
-
-장애 복구 방식
-
-데이터 정합성 복구 전략
-
-실제 부하 테스트 결과
+- 충돌 빈도가 낮음
+- 긴 DB Lock을 피하고 싶음
+- Retry 비용이 크지 않음
 ```
 
-따라서 특정 기술의 이름보다
-**문제의 특성과 실제 측정 결과를 기반으로 전략을 선택하는 것이 중요하다**
-는 결론을 얻었습니다.
+충돌이 많은 환경에서는 Retry 비용을 반드시 고려해야 합니다.
 
 ---
 
-# 33. 향후 개선
+## Redis
 
-현재 구현 이후 추가로 검토할 수 있는 작업은 다음과 같습니다.
-
-### Redis / MySQL 정합성
+적합한 경우:
 
 ```text
-TransactionSynchronization
-Retry Queue
-Reconciliation
-Outbox Pattern
+- 높은 처리량 필요
+- DB Row 경합을 줄이고 싶음
+- Redis 운영이 가능함
+- Dual Write 정합성 문제를 해결할 수 있음
 ```
 
-### 운영 환경
+---
+
+# 25. Monitoring
+
+전략별 동작을 운영 관점에서도 확인하기 위해 Micrometer Custom Metric을 추가했습니다.
 
 ```text
-Metrics
-Tracing
-Structured Logging
+EventEntryStrategyService
+        ↓
+EntryMetrics
+        ↓
+Micrometer
+        ↓
+/actuator/prometheus
+        ↓
+Prometheus
+        ↓
+Grafana
 ```
 
-### 실행 환경
+---
+
+## 25.1 Metric
+
+Request Counter:
 
 ```text
+seonchaksun.entry.requests
+```
+
+Prometheus:
+
+```text
+seonchaksun_entry_requests_total
+```
+
+Timer:
+
+```text
+seonchaksun.entry.duration
+```
+
+Prometheus:
+
+```text
+seonchaksun_entry_duration_seconds_count
+seonchaksun_entry_duration_seconds_sum
+```
+
+---
+
+# 26. Metric Result 분리
+
+단순 성공/실패가 아니라 다음 세 상태로 구분합니다.
+
+```text
+success
+business_failure
+unexpected_failure
+```
+
+---
+
+## success
+
+```text
+정상 신청 성공
+```
+
+---
+
+## business_failure
+
+예:
+
+```text
+- 정원 초과
+- 중복 신청
+- 신청 가능 시간이 아님
+- 존재하지 않는 이벤트
+```
+
+예상 가능한 비즈니스 예외입니다.
+
+---
+
+## unexpected_failure
+
+예상하지 못한 시스템 오류입니다.
+
+예:
+
+```text
+RuntimeException
+500 Internal Server Error
+```
+
+이를 통해 정원 초과 같은 정상적인 비즈니스 거절과 실제 시스템 장애를 모니터링에서 분리할 수 있습니다.
+
+---
+
+# 27. Grafana Dashboard
+
+현재 Dashboard에서는 다음 지표를 확인합니다.
+
+```text
+JVM 힙 메모리 사용량
+백엔드 CPU 사용률
+초당 HTTP 요청 수
+HTTP 평균 응답 시간
+
+전략별 신청 요청 수
+전략별 신청 성공 수
+전략별 비즈니스 실패 수
+전략별 시스템 오류 수
+전략별 평균 처리 시간
+```
+
+Dashboard는 JSON으로 Repository에서 관리하고 Grafana Provisioning을 사용해 자동 로드합니다.
+
+---
+
+# 28. Benchmark의 한계
+
+이번 Benchmark 환경:
+
+```text
+Windows Local PC
 Docker Compose
-다중 Application Instance
+
+Backend    : Single Instance
+MySQL      : Single Instance
+Redis      : Single Instance
+Prometheus : Single Instance
+Grafana    : Single Instance
 ```
 
-### API 문서
+따라서 결과를 일반화해서:
 
 ```text
-Swagger
-OpenAPI
+Redis는 항상 Atomic보다 몇 배 빠르다
 ```
+
+라고 표현할 수는 없습니다.
+
+실제 운영 환경에서는 다음 요소의 영향을 받습니다.
+
+```text
+- Hardware
+- Network Latency
+- DB Instance Spec
+- Redis Deployment
+- Connection Pool
+- Backend Instance Count
+- Traffic Pattern
+- DB Replication
+- Redis Cluster
+- GC
+- JVM Warm-up
+```
+
+현재 결과는 동일한 로컬 환경에서 각 전략의 상대적인 특성을 비교하기 위한 Benchmark입니다.
 
 ---
 
-# 34. 관련 파일
+# 29. 프로젝트를 통해 확인한 점
 
-상세 구현은 프로젝트 코드에서 확인할 수 있습니다.
+이 프로젝트를 통해 가장 중요하게 확인한 것은 동시성 전략에는 하나의 정답이 없다는 점입니다.
+
+Atomic Update는 간단하면서 안정적이었고,
+
+Pessimistic Lock은 높은 경합 환경에서 예상보다 좋은 성능을 보였습니다.
+
+Optimistic Lock은 대부분의 요청은 빠르지만 Retry로 인해 Tail Latency가 크게 증가했습니다.
+
+Redis는 높은 처리량을 얻을 수 있었지만 MySQL과의 Dual Write 문제라는 새로운 복잡도를 만들었습니다.
+
+또한 Atomic 전략에서는 단순한 코드 분석만으로 발견하기 어려운:
 
 ```text
-src/main/java/com/seonchaksun/event
-src/main/java/com/seonchaksun/entry
-src/test
-k6/entry-burst.js
+MySQL REPEATABLE_READ
++
+MVCC Snapshot
 ```
 
-프로젝트 전체 설명:
+문제를 실제 부하 테스트를 통해 발견했습니다.
+
+따라서 최종적으로 중요하다고 판단한 것은:
 
 ```text
-README.md
+구현
+↓
+동시성 테스트
+↓
+HTTP 부하 테스트
+↓
+DB 상태 확인
+↓
+모니터링
+↓
+실패 원인 분석
 ```
+
+까지 이어지는 검증 과정입니다.
+
+---
+
+# 30. 최종 결론
+
+이 프로젝트는 선착순 신청 API를 만드는 것이 핵심이 아닙니다.
+
+높은 경합 상황을 이용해:
+
+```text
+Lost Update
+Atomic Update
+Pessimistic Lock
+Optimistic Lock
+Retry
+Redis Lua Script
+Duplicate Race
+MVCC
+Dual Write
+Observability
+Load Test
+```
+
+를 하나의 흐름으로 직접 구현하고 검증하는 것이 목적입니다.
+
+최종적으로 다음 과정을 경험했습니다.
+
+```text
+문제 재현
+↓
+원인 분석
+↓
+해결 전략 구현
+↓
+정확성 검증
+↓
+성능 측정
+↓
+예상하지 못한 장애 발견
+↓
+DB 내부 동작 분석
+↓
+수정
+↓
+재검증
+↓
+모니터링 및 문서화
+```
+
+즉 단순히 "동시성 제어를 적용했다"가 아니라,
+
+> **어떤 문제가 발생했고, 왜 발생했으며, 여러 해결책이 어떤 트레이드오프를 가지는지를 실제 테스트 결과로 비교하는 것**
+
+이 프로젝트의 핵심입니다.

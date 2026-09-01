@@ -7,6 +7,7 @@ import com.seonchaksun.entry.repository.EventEntryRepository;
 import com.seonchaksun.event.domain.Event;
 import com.seonchaksun.event.domain.EventNotFoundException;
 import com.seonchaksun.event.repository.EventRepository;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -81,25 +82,34 @@ public class OptimisticEventEntryTransactionService {
                         now
                 );
 
-        EventEntry savedEntry =
-                eventEntryRepository
-                        .save(entry);
+        try {
 
-        /*
-         * Event는 영속 상태이므로
-         * save(event)를 하지 않아도
-         * Dirty Checking으로 UPDATE된다.
-         *
-         * @Version 때문에 Hibernate가
-         *
-         * WHERE id = ?
-         *   AND version = ?
-         *
-         * 조건을 함께 사용한다.
-         */
-        return EventEntryResponse.from(
-                savedEntry
-        );
+            /*
+             * saveAndFlush()를 사용해 UNIQUE Constraint 위반을
+             * 이 메서드 안에서 즉시 감지한다.
+             *
+             * flush 시 Event의 @Version UPDATE도 함께 수행되므로
+             * Optimistic Lock 충돌은 상위 재시도 로직으로 전달된다.
+             */
+            EventEntry savedEntry =
+                    eventEntryRepository
+                            .saveAndFlush(
+                                    entry
+                            );
+
+            return EventEntryResponse.from(
+                    savedEntry
+            );
+
+        } catch (
+                DataIntegrityViolationException e
+        ) {
+
+            throw new DuplicateEntryException(
+                    eventId,
+                    userId
+            );
+        }
     }
 
     private void validateDuplicateEntry(

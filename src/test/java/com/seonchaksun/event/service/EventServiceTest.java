@@ -1,5 +1,6 @@
 package com.seonchaksun.event.service;
 
+import com.seonchaksun.entry.service.EntryStrategy;
 import com.seonchaksun.event.domain.Event;
 import com.seonchaksun.event.domain.EventNotFoundException;
 import com.seonchaksun.event.dto.EventCreateRequest;
@@ -73,6 +74,9 @@ class EventServiceTest {
         assertThat(savedEvent.getCurrentCount())
                 .isZero();
 
+        assertThat(savedEvent.getStrategy())
+                .isEqualTo(EntryStrategy.ATOMIC);
+
         assertThat(savedEvent.getOpenAt())
                 .isEqualTo(OPEN_AT);
 
@@ -90,6 +94,9 @@ class EventServiceTest {
 
         assertThat(response.currentCount())
                 .isZero();
+
+        assertThat(response.strategy())
+                .isEqualTo(EntryStrategy.ATOMIC);
 
         assertThat(response.openAt())
                 .isEqualTo(OPEN_AT);
@@ -125,6 +132,9 @@ class EventServiceTest {
 
         assertThat(response.currentCount())
                 .isZero();
+
+        assertThat(response.strategy())
+                .isEqualTo(EntryStrategy.ATOMIC);
 
         assertThat(response.openAt())
                 .isEqualTo(OPEN_AT);

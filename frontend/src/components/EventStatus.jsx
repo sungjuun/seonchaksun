@@ -31,7 +31,9 @@ function EventStatus({
 
     const countSource =
         status?.countSource ??
-        "MYSQL";
+        (strategy === "redis"
+            ? "REDIS"
+            : "MYSQL");
 
     return (
         <article className="console-card event-status-card">
@@ -58,8 +60,8 @@ function EventStatus({
             </div>
 
             <p className="event-subtitle">
-                선택한 동시성 전략 기준으로
-                현재 신청 상태를 조회합니다.
+                이 이벤트에 고정된 처리 방식 기준으로
+                현재 신청 인원과 남은 자리를 확인합니다.
             </p>
 
             <div className="event-count-area">
@@ -67,7 +69,7 @@ function EventStatus({
                 <div className="event-count">
 
                     <span>
-                        신청 인원
+                        현재 신청 인원
                     </span>
 
                     <div>
@@ -95,7 +97,7 @@ function EventStatus({
                     </strong>
 
                     <small>
-                        seats
+                        자리
                     </small>
 
                 </div>
@@ -138,7 +140,7 @@ function EventStatus({
                 <div className="metadata-item">
 
                     <span>
-                        인원 기준
+                        인원 관리 기준
                     </span>
 
                     <strong
@@ -149,7 +151,9 @@ function EventStatus({
                                 : "source-badge mysql-source"
                         }
                     >
-                        {countSource}
+                        {countSource === "REDIS"
+                            ? "Redis"
+                            : "MySQL"}
                     </strong>
 
                 </div>
@@ -157,7 +161,7 @@ function EventStatus({
                 <div className="metadata-item">
 
                     <span>
-                        적용 전략
+                        현재 처리 방식
                     </span>
 
                     <strong>
@@ -206,8 +210,8 @@ function EventStatus({
 
                 <p>
                     {countSource === "REDIS"
-                        ? "Redis 전략은 Redis Counter를 정원 기준으로 사용합니다."
-                        : "현재 전략은 MySQL events.current_count를 정원 기준으로 사용합니다."}
+                        ? "Redis 선점 방식은 Redis에서 현재 신청 인원을 관리합니다."
+                        : "현재 방식은 MySQL에서 현재 신청 인원을 관리합니다."}
                 </p>
 
             </div>
@@ -221,16 +225,16 @@ function formatStrategy(strategy) {
     switch (strategy) {
 
         case "atomic":
-            return "Atomic Update";
+            return "조건부 업데이트";
 
         case "pessimistic":
-            return "Pessimistic Lock";
+            return "DB 잠금 방식";
 
         case "optimistic":
-            return "Optimistic Lock";
+            return "버전 충돌 재시도";
 
         case "redis":
-            return "Redis + MySQL";
+            return "Redis 선점 방식";
 
         default:
             return strategy;

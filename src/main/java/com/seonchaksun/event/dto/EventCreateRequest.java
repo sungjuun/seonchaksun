@@ -1,5 +1,6 @@
 package com.seonchaksun.event.dto;
 
+import com.seonchaksun.entry.service.EntryStrategy;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -38,6 +39,21 @@ public record EventCreateRequest(
         int capacity,
 
         @Schema(
+                description = "이 이벤트에 고정해서 사용할 동시성 처리 전략",
+                example = "ATOMIC",
+                allowableValues = {
+                        "ATOMIC",
+                        "PESSIMISTIC",
+                        "OPTIMISTIC",
+                        "REDIS"
+                }
+        )
+        @NotNull(
+                message = "이벤트 처리 전략은 필수입니다."
+        )
+        EntryStrategy strategy,
+
+        @Schema(
                 description = "이벤트 신청 시작 시간",
                 example = "2026-08-11T14:00:00"
         )
@@ -56,4 +72,24 @@ public record EventCreateRequest(
         LocalDateTime closeAt
 
 ) {
+
+    /*
+     * 기존 단위 테스트/내부 코드 호환용 생성자.
+     * API JSON 요청에는 canonical constructor가 사용되므로
+     * 실제 API에서는 strategy가 필수다.
+     */
+    public EventCreateRequest(
+            String name,
+            int capacity,
+            LocalDateTime openAt,
+            LocalDateTime closeAt
+    ) {
+        this(
+                name,
+                capacity,
+                EntryStrategy.ATOMIC,
+                openAt,
+                closeAt
+        );
+    }
 }

@@ -3,7 +3,6 @@ package com.seonchaksun.entry.controller;
 import com.seonchaksun.entry.dto.EventEntryRequest;
 import com.seonchaksun.entry.dto.EventEntryResponse;
 import com.seonchaksun.entry.service.EntryStrategy;
-import com.seonchaksun.entry.service.EventEntryService;
 import com.seonchaksun.entry.service.EventEntryStrategyService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -31,25 +30,21 @@ import java.net.URI;
 @RequestMapping("/api/events/{eventId}/entries")
 public class EventEntryController {
 
-    private final EventEntryService eventEntryService;
-
     private final EventEntryStrategyService eventEntryStrategyService;
 
     public EventEntryController(
-            EventEntryService eventEntryService,
             EventEntryStrategyService eventEntryStrategyService
     ) {
-        this.eventEntryService = eventEntryService;
         this.eventEntryStrategyService = eventEntryStrategyService;
     }
 
     @Operation(
             summary = "이벤트 신청",
             description = """
-                    기본 동시성 처리 전략을 사용해
+                    이벤트를 생성할 때 지정한 동시성 처리 전략으로
                     선착순 이벤트에 신청합니다.
 
-                    현재 기본 전략은 Atomic Update입니다.
+                    이벤트마다 하나의 전략만 사용합니다.
 
                     신청 성공 시 HTTP 201 Created를 반환합니다.
 
@@ -139,7 +134,7 @@ public class EventEntryController {
     ) {
 
         EventEntryResponse response =
-                eventEntryService.enter(
+                eventEntryStrategyService.enterForEvent(
                         eventId,
                         request.userId()
                 );
@@ -154,10 +149,10 @@ public class EventEntryController {
             summary = "동시성 전략을 선택하여 이벤트 신청",
             description = """
                     지정한 동시성 제어 전략을 이용해
-                    동일한 선착순 이벤트에 신청합니다.
+                    선착순 이벤트에 신청합니다.
 
-                    이 API는 각 동시성 전략의 정합성과
-                    처리 성능을 비교하기 위해 사용합니다.
+                    요청 전략은 이벤트를 생성할 때 저장한 전략과
+                    반드시 같아야 합니다. 다른 전략이면 400을 반환합니다.
 
                     지원 전략:
 

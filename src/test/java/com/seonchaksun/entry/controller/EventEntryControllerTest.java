@@ -4,7 +4,6 @@ import com.seonchaksun.entry.domain.DuplicateEntryException;
 import com.seonchaksun.entry.dto.EventEntryRequest;
 import com.seonchaksun.entry.dto.EventEntryResponse;
 import com.seonchaksun.entry.service.EntryStrategy;
-import com.seonchaksun.entry.service.EventEntryService;
 import com.seonchaksun.entry.service.EventEntryStrategyService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -32,9 +31,6 @@ class EventEntryControllerTest {
 
     @Autowired
     private JsonMapper jsonMapper;
-
-    @MockitoBean
-    private EventEntryService eventEntryService;
 
     /*
      * EventEntryController에 새로 추가된 의존성.
@@ -69,7 +65,7 @@ class EventEntryControllerTest {
                 );
 
         when(
-                eventEntryService.enter(
+                eventEntryStrategyService.enterForEvent(
                         1L,
                         1001L
                 )
@@ -113,8 +109,8 @@ class EventEntryControllerTest {
                                 .value(1001)
                 );
 
-        verify(eventEntryService)
-                .enter(
+        verify(eventEntryStrategyService)
+                .enterForEvent(
                         1L,
                         1001L
                 );
@@ -164,7 +160,7 @@ class EventEntryControllerTest {
                 new EventEntryRequest(1001L);
 
         when(
-                eventEntryService.enter(
+                eventEntryStrategyService.enterForEvent(
                         1L,
                         1001L
                 )

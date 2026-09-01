@@ -1,7 +1,10 @@
 package com.seonchaksun.event.domain;
 
+import com.seonchaksun.entry.service.EntryStrategy;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -28,6 +31,16 @@ public class Event {
     @Column(name = "current_count", nullable = false)
     private int currentCount;
 
+    /*
+     * 이 이벤트에서 사용할 동시성 처리 전략.
+     *
+     * 하나의 이벤트는 하나의 전략만 사용하도록 고정해서
+     * Redis Counter와 MySQL current_count가 섞이는 문제를 막는다.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "strategy", nullable = false, length = 20)
+    private EntryStrategy strategy;
+
     @Column(name = "open_at", nullable = false)
     private LocalDateTime openAt;
 
@@ -50,11 +63,13 @@ public class Event {
     private Event(
             String name,
             int capacity,
+            EntryStrategy strategy,
             LocalDateTime openAt,
             LocalDateTime closeAt
     ) {
         validateName(name);
         validateCapacity(capacity);
+        validateStrategy(strategy);
         validateEventPeriod(
                 openAt,
                 closeAt
@@ -63,6 +78,7 @@ public class Event {
         this.name = name;
         this.capacity = capacity;
         this.currentCount = 0;
+        this.strategy = strategy;
         this.openAt = openAt;
         this.closeAt = closeAt;
     }
@@ -70,12 +86,34 @@ public class Event {
     public static Event create(
             String name,
             int capacity,
+            EntryStrategy strategy,
             LocalDateTime openAt,
             LocalDateTime closeAt
     ) {
         return new Event(
                 name,
                 capacity,
+                strategy,
+                openAt,
+                closeAt
+        );
+    }
+
+    /*
+     * 기존 테스트/내부 코드 호환용 생성 메서드.
+     * 전략을 지정하지 않은 기존 코드는 ATOMIC을 기본값으로 사용한다.
+     * 실제 이벤트 생성 API에서는 strategy 입력을 필수로 받는다.
+     */
+    public static Event create(
+            String name,
+            int capacity,
+            LocalDateTime openAt,
+            LocalDateTime closeAt
+    ) {
+        return create(
+                name,
+                capacity,
+                EntryStrategy.ATOMIC,
                 openAt,
                 closeAt
         );
@@ -106,6 +144,16 @@ public class Event {
         if (capacity < 1) {
             throw new EventException(
                     "이벤트 정원은 1명 이상이어야 합니다."
+            );
+        }
+    }
+
+    private void validateStrategy(
+            EntryStrategy strategy
+    ) {
+        if (strategy == null) {
+            throw new EventException(
+                    "이벤트 처리 전략은 필수입니다."
             );
         }
     }
@@ -173,6 +221,10 @@ public class Event {
 
     public int getCurrentCount() {
         return currentCount;
+    }
+
+    public EntryStrategy getStrategy() {
+        return strategy;
     }
 
     public LocalDateTime getOpenAt() {

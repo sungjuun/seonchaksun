@@ -103,6 +103,10 @@ class EventControllerTest {
                                 .value(0)
                 )
                 .andExpect(
+                        jsonPath("$.strategy")
+                                .value("ATOMIC")
+                )
+                .andExpect(
                         jsonPath("$.openAt")
                                 .value("2026-08-10T10:00:00")
                 )
@@ -153,6 +157,10 @@ class EventControllerTest {
                                 .value(0)
                 )
                 .andExpect(
+                        jsonPath("$.strategy")
+                                .value("ATOMIC")
+                )
+                .andExpect(
                         jsonPath("$.openAt")
                                 .value("2026-08-10T10:00:00")
                 )
@@ -199,6 +207,7 @@ class EventControllerTest {
                 {
                   "name": " ",
                   "capacity": 100,
+                  "strategy": "ATOMIC",
                   "openAt": "2026-08-10T10:00:00",
                   "closeAt": "2026-08-10T18:00:00"
                 }
@@ -229,6 +238,7 @@ class EventControllerTest {
                 {
                   "name": "한정판 키보드 사전예약",
                   "capacity": 0,
+                  "strategy": "ATOMIC",
                   "openAt": "2026-08-10T10:00:00",
                   "closeAt": "2026-08-10T18:00:00"
                 }
@@ -261,6 +271,7 @@ class EventControllerTest {
                 {
                   "name": "한정판 키보드 사전예약",
                   "capacity": 100,
+                  "strategy": "ATOMIC",
                   "closeAt": "2026-08-10T18:00:00"
                 }
                 """;
@@ -300,6 +311,7 @@ class EventControllerTest {
                 {
                   "name": "잘못된 이벤트",
                   "capacity": 100,
+                  "strategy": "ATOMIC",
                   "openAt": "2026-08-10T18:00:00",
                   "closeAt": "2026-08-10T10:00:00"
                 }

@@ -25,6 +25,7 @@ public class EventService {
         Event event = Event.create(
                 request.name(),
                 request.capacity(),
+                request.strategy(),
                 request.openAt(),
                 request.closeAt()
         );
