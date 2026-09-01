@@ -1,107 +1,184 @@
 # 선착순
 
-> **200개의 신청 요청이 몰려도, 정확하게 100명만 받을 수 있을까?**
+> **200개의 신청 요청이 몰려도, 정확하게 정원까지만 받을 수 있을까?**
 
-선착순 이벤트에서 발생하는 동시성 문제를 직접 재현하고,  
-**Atomic Update / Pessimistic Lock / Optimistic Lock / Redis Lua Script** 전략을 구현하여  
-정확성, 성능, 장애 특성을 비교한 백엔드 프로젝트입니다.
+선착순 이벤트처럼 많은 사용자가 짧은 시간에 동시에 신청할 때 발생하는
+**동시성 문제를 직접 재현하고 해결 방법을 비교한 프로젝트**입니다.
 
-단순한 이벤트 CRUD 구현보다 **동시성 제어라는 하나의 문제를 깊게 분석하고 검증하는 것**을 목표로 했습니다.
+다음 네 가지 방식을 구현했습니다.
 
----
+* Atomic Update
+* Pessimistic Lock
+* Optimistic Lock
+* Redis Lua Script
 
-## 핵심 요약
-
-정원이 100명인 이벤트에 200개의 요청이 몰리는 상황을 기준으로 다음 과정을 수행했습니다.
-
-```text
-단순 구현
-    ↓
-Lost Update 재현
-    ↓
-Atomic / Pessimistic / Optimistic / Redis 구현
-    ↓
-정확성 검증
-    ↓
-k6 HTTP 부하 테스트
-    ↓
-MySQL MVCC 문제 발견 및 해결
-    ↓
-Prometheus / Grafana 모니터링
-    ↓
-최종 성능 비교 및 문서화
-```
-
-최종적으로 모든 동시성 전략에서:
-
-```text
-Success             = 100
-Business Failure    = 100
-Unexpected Failure  = 0
-```
-
-을 만족하도록 구현했습니다.
+각 방식이 실제로 정원을 정확하게 지키는지 확인하고,
+k6 부하 테스트와 Prometheus / Grafana를 이용해 성능 차이도 비교했습니다.
 
 ---
 
-# Quick Start
+# 프로젝트를 쉽게 이해하면
 
-## 1. 전체 Docker 환경 실행
+예를 들어 **3명만 받을 수 있는 이벤트**가 있다고 가정합니다.
 
-프로젝트 루트에서:
+```text
+정원: 3명
+
+사용자 1001 신청 → 성공
+사용자 1002 신청 → 성공
+사용자 1003 신청 → 성공
+사용자 1004 신청 → 실패
+```
+
+일반적인 상황에서는 간단해 보이지만 여러 사용자가 거의 동시에 신청하면 문제가 생길 수 있습니다.
+
+```text
+현재 신청자 = 2명
+
+A 사용자 → 아직 자리 있네?
+B 사용자 → 아직 자리 있네?
+
+A 신청 성공
+B 신청 성공
+
+결과 → 정원은 3명인데 4명이 신청될 수 있음
+```
+
+이 프로젝트는 이런 문제를 막기 위한 여러 방법을 직접 구현하고 비교합니다.
+
+---
+
+# 핵심 변경 사항
+
+현재 버전에서는 **하나의 이벤트에 하나의 동시성 처리 전략만 사용할 수 있습니다.**
+
+기존처럼:
+
+```text
+이벤트 1
+├─ Atomic
+├─ Pessimistic
+├─ Optimistic
+└─ Redis
+```
+
+를 중간에 자유롭게 바꾸는 방식이 아니라:
+
+```text
+이벤트 1 → Atomic 전용
+
+이벤트 2 → Pessimistic 전용
+
+이벤트 3 → Optimistic 전용
+
+이벤트 4 → Redis 전용
+```
+
+으로 동작합니다.
+
+이렇게 변경한 이유는 Redis와 DB 기반 전략이 신청 인원을 관리하는 위치가 다르기 때문입니다.
+
+전략을 한 이벤트에서 섞어서 사용할 경우 실제 정원을 초과할 가능성이 있기 때문에,
+**이벤트를 생성할 때 전략을 하나 선택하고 이후에는 변경하지 못하도록 수정했습니다.**
+
+---
+
+# 처음 사용하는 사람을 위한 5분 테스트
+
+개발 지식이 많지 않아도 아래 순서대로 진행하면 직접 테스트할 수 있습니다.
+
+## 준비 프로그램
+
+화면으로 프로젝트를 체험하는 데 필요한 프로그램은 두 가지입니다.
+
+* Docker Desktop
+* Node.js / npm
+
+GitHub에서 프로젝트를 직접 내려받고 싶다면 Git도 사용할 수 있습니다.
+
+성능 테스트까지 진행하려면 추가로:
+
+* k6
+
+가 필요합니다.
+
+Java 테스트까지 직접 실행하려면:
+
+* Java 17
+
+이 필요합니다.
+
+---
+
+# 1. 프로젝트 실행
+
+먼저 Docker Desktop을 실행합니다.
+
+그다음 PowerShell에서 프로젝트 폴더로 이동합니다.
+
+예:
 
 ```powershell
-docker compose up -d
+cd C:\Users\사용자명\Desktop\seonchaksun
 ```
 
-상태 확인:
+Docker 환경을 실행합니다.
+
+```powershell
+docker compose up -d --build
+```
+
+처음 실행하는 경우 Backend 이미지 생성 때문에 시간이 조금 더 걸릴 수 있습니다.
+
+실행 상태를 확인합니다.
 
 ```powershell
 docker compose ps
 ```
 
-주요 서비스가 정상적으로 실행되어야 합니다.
+정상적인 경우 다음 서비스가 실행되어 있어야 합니다.
 
 ```text
-Backend
-MySQL
-Redis
-Prometheus
-Grafana
+seonchaksun-mysql
+seonchaksun-redis
+seonchaksun-backend
+seonchaksun-prometheus
+seonchaksun-grafana
 ```
+
+`STATUS`가 `Up` 또는 `healthy`이면 정상입니다.
 
 ---
 
-## 2. 주요 접속 주소
+# 2. Frontend 실행
 
-| 서비스 | 주소 |
-|---|---|
-| Backend | `http://localhost:8080` |
-| Swagger | `http://localhost:8080/swagger` |
-| Actuator Health | `http://localhost:8080/actuator/health` |
-| Prometheus Metrics | `http://localhost:8080/actuator/prometheus` |
-| Prometheus | `http://localhost:9090` |
-| Grafana | `http://localhost:3000` |
-| Frontend | `http://localhost:5173` |
+새 PowerShell 창을 하나 더 엽니다.
 
-Grafana 로컬 기본 계정:
-
-```text
-ID: admin
-PW: admin
-```
-
----
-
-## 3. Frontend 실행
+프로젝트의 `frontend` 폴더로 이동합니다.
 
 ```powershell
 cd frontend
+```
+
+처음 한 번만 필요한 패키지를 설치합니다.
+
+```powershell
 npm.cmd install
+```
+
+Frontend를 실행합니다.
+
+```powershell
 npm.cmd run dev
 ```
 
-접속:
+정상적으로 실행되면 다음과 비슷한 주소가 표시됩니다.
+
+```text
+http://localhost:5173
+```
+
+Chrome 또는 Edge에서 접속합니다.
 
 ```text
 http://localhost:5173
@@ -109,134 +186,335 @@ http://localhost:5173
 
 ---
 
-## 4. Backend 테스트
+# 3. 가장 쉬운 선착순 테스트
 
-프로젝트 루트에서:
+처음에는 정원을 `100`으로 하지 말고 **3명**으로 테스트하는 것을 추천합니다.
 
-```powershell
-.\gradlew.bat test
-```
-
----
-
-## 5. 전략별 최종 Benchmark
-
-```powershell
-.\scripts\benchmark.ps1 -Strategy atomic
-```
-
-```powershell
-.\scripts\benchmark.ps1 -Strategy pessimistic
-```
-
-```powershell
-.\scripts\benchmark.ps1 -Strategy optimistic
-```
-
-```powershell
-.\scripts\benchmark.ps1 -Strategy redis
-```
-
-스크립트는 자동으로:
+화면의 **테스트 이벤트 생성** 영역에서 다음처럼 입력합니다.
 
 ```text
-Event 생성
-↓
-Warm-up 1회
-↓
-10초 대기
-↓
-Measured Run 5회
+이벤트명
+동시성 테스트
+
+정원
+3
+
+처리 전략
+Atomic - 조건부 업데이트
 ```
 
-를 수행합니다.
-
----
-
-# 사용 흐름
-
-Frontend를 기준으로 프로젝트를 사용하는 흐름은 다음과 같습니다.
+그리고:
 
 ```text
 이벤트 생성
-    ↓
-이벤트 번호 입력
-    ↓
-동시성 처리 방식 선택
-    ↓
-사용자 번호 입력
-    ↓
-선착순 신청
-    ↓
-현재 신청 인원 확인
-    ↓
-성능 비교
-    ↓
-Grafana에서 운영 지표 확인
 ```
 
-Frontend에서 표시하는 전략명은 이해하기 쉽게 다음과 같이 구성했습니다.
+버튼을 누릅니다.
 
-| UI 표시명 | 실제 전략 |
-|---|---|
-| 조건부 업데이트 | Atomic Update |
-| DB 잠금 방식 | Pessimistic Lock |
-| 버전 충돌 재시도 | Optimistic Lock |
-| Redis 선점 방식 | Redis Lua Script |
+이벤트 생성 시간이 자동으로 설정되기 때문에 별도로 시작/종료 시간을 입력할 필요는 없습니다.
 
----
-
-# 1. 프로젝트 목표
-
-이 프로젝트에서 확인하고 싶었던 것은 단순히:
-
-> "어떻게 하면 100명까지만 신청시킬 수 있을까?"
-
-가 아니었습니다.
-
-다음 질문에 직접 답하는 것을 목표로 했습니다.
-
-### 1. 동시성 제어가 없으면 실제로 어떤 문제가 발생하는가?
-
-### 2. DB 기반 동시성 제어 방식은 각각 어떤 특성을 가지는가?
-
-### 3. Optimistic Lock의 Retry는 높은 경합 환경에서 어떤 영향을 주는가?
-
-### 4. Redis를 사용하면 처리량은 얼마나 달라지는가?
-
-### 5. Redis와 MySQL을 동시에 사용할 때 정합성 문제는 어떻게 다뤄야 하는가?
-
-### 6. 코드상 정상처럼 보여도 실제 부하 테스트에서는 어떤 문제가 발생하는가?
-
-프로젝트는 다음 순서로 진행했습니다.
+현재 구현에서는:
 
 ```text
-가장 단순한 구현
-        ↓
-동시성 문제 재현
-        ↓
-원인 분석
-        ↓
-동시성 전략 구현
-        ↓
-정확성 테스트
-        ↓
-k6 HTTP 부하 테스트
-        ↓
-성능 비교
-        ↓
-Prometheus / Grafana 모니터링
-        ↓
-결과 및 한계 문서화
+시작 시간 = 생성 시점 약 1분 전
+종료 시간 = 생성 시점 약 2시간 후
+```
+
+로 자동 설정됩니다.
+
+---
+
+# 4. 신청 테스트
+
+이벤트를 생성하면 해당 이벤트가 자동으로 선택됩니다.
+
+처리 전략도 생성할 때 선택한 방식으로 고정됩니다.
+
+사용자 번호에:
+
+```text
+1001
+```
+
+을 입력하고:
+
+```text
+선착순 신청하기
+```
+
+를 누릅니다.
+
+정상이면 신청 성공 메시지가 표시됩니다.
+
+다음 사용자도 신청합니다.
+
+```text
+1002 → 성공
+1003 → 성공
+```
+
+정원이 3명이므로:
+
+```text
+1004 → 실패
+```
+
+가 되어야 합니다.
+
+즉 결과는:
+
+```text
+정원     = 3명
+
+1001    성공
+1002    성공
+1003    성공
+1004    정원 초과로 실패
+```
+
+가 정상입니다.
+
+---
+
+# 5. 중복 신청 테스트
+
+이미 성공한 사용자 번호를 다시 입력합니다.
+
+예:
+
+```text
+1001
+```
+
+다시:
+
+```text
+선착순 신청하기
+```
+
+를 누릅니다.
+
+정상이라면 중복 신청이 거절됩니다.
+
+```text
+1001 첫 번째 신청 → 성공
+
+1001 두 번째 신청 → 실패
+```
+
+DB에도:
+
+```text
+UNIQUE(event_id, user_id)
+```
+
+제약조건을 두어 동일 사용자가 같은 이벤트에 중복 신청하지 못하도록 했습니다.
+
+---
+
+# 6. 다른 전략 테스트
+
+다른 방식을 테스트하고 싶다면 **기존 이벤트의 전략을 변경하는 것이 아니라 새로운 이벤트를 생성해야 합니다.**
+
+예를 들어 Redis를 확인하려면:
+
+```text
+이벤트명
+Redis 테스트
+
+정원
+3
+
+처리 전략
+Redis - Redis 선점
+```
+
+으로 새로운 이벤트를 생성합니다.
+
+그리고 다시:
+
+```text
+1001 → 성공
+1002 → 성공
+1003 → 성공
+1004 → 실패
+```
+
+가 되는지 확인합니다.
+
+각 전략은 별도의 이벤트를 사용해야 합니다.
+
+```text
+Atomic 테스트       → Event A
+Pessimistic 테스트  → Event B
+Optimistic 테스트   → Event C
+Redis 테스트        → Event D
 ```
 
 ---
 
-# 2. Architecture
+# 네 가지 전략을 쉽게 이해하면
+
+| 화면 표시                  | 실제 방식            | 쉽게 설명하면                 |
+| ---------------------- | ---------------- | ----------------------- |
+| Atomic - 조건부 업데이트      | Atomic Update    | 정원 확인과 증가를 DB가 한 번에 처리  |
+| Pessimistic - DB 잠금    | Pessimistic Lock | 한 요청이 처리 중이면 다른 요청은 기다림 |
+| Optimistic - 버전 충돌 재시도 | Optimistic Lock  | 먼저 처리하고 충돌하면 다시 시도      |
+| Redis - Redis 선점       | Redis Lua Script | 빠른 Redis가 먼저 번호표를 발급    |
+
+---
+
+## Atomic Update
+
+DB에게:
+
+```text
+현재 인원이 정원보다 적으면
+신청 인원을 1 증가시켜라.
+```
+
+라는 작업을 한 번에 요청합니다.
+
+예:
+
+```text
+현재 2명 / 정원 3명
+
+A 신청
+→ 2 < 3
+→ 3명
+
+B 신청
+→ 3 < 3 아님
+→ 실패
+```
+
+구현이 비교적 단순하면서 정합성을 유지할 수 있습니다.
+
+---
+
+## Pessimistic Lock
+
+한 사용자가 이벤트를 처리하는 동안 해당 데이터를 잠급니다.
+
+```text
+A 신청
+
+↓
+Event 잠금
+
+B 신청
+↓
+대기
+
+A 처리 완료
+↓
+잠금 해제
+
+B 처리
+```
+
+정합성을 이해하기 쉽고 안정적이지만 요청이 많아지면 Lock 대기가 발생할 수 있습니다.
+
+---
+
+## Optimistic Lock
+
+처음부터 데이터를 잠그지는 않습니다.
+
+대신 데이터의 `version` 값을 확인합니다.
+
+```text
+A → version 10 조회
+B → version 10 조회
+
+A → 수정 성공
+     version 11
+
+B → 수정 시도
+
+"내가 읽었을 때는 10이었는데
+지금은 11이네?"
+
+→ 충돌
+→ 잠깐 기다림
+→ 다시 시도
+```
+
+충돌이 적은 환경에서는 효율적이지만 선착순처럼 요청이 몰리는 환경에서는 Retry가 많이 발생할 수 있습니다.
+
+---
+
+## Redis Lua Script
+
+Redis를 빠른 번호표 발급기처럼 사용합니다.
+
+```text
+신청 요청
+↓
+Redis
+
+현재 신청자 확인
+↓
+정원 확인
+↓
+카운터 증가
+↓
+MySQL에 신청 정보 저장
+```
+
+Redis Lua Script 안에서:
+
+```text
+현재 값 조회
++
+정원 확인
++
+카운터 증가
+```
+
+를 한 번에 수행합니다.
+
+---
+
+# 프로젝트 전체 흐름
+
+```text
+사용자
+  ↓
+React Frontend
+  ↓
+Spring Boot API
+  ↓
+이벤트에 설정된 전략 확인
+  ↓
+┌──────────────────────────────┐
+│ Atomic                       │
+│ Pessimistic                  │
+│ Optimistic                   │
+│ Redis                        │
+└──────────────────────────────┘
+  ↓
+MySQL / Redis
+  ↓
+신청 성공 또는 실패
+  ↓
+화면에 결과 표시
+```
+
+---
+
+# Architecture
 
 ```mermaid
 flowchart LR
-    U[Client / k6] --> C[EventEntryController]
+
+    U[User / k6]
+
+    U --> F[React Frontend]
+    U --> C[EventEntryController]
+
+    F --> C
 
     C --> S[EventEntryStrategyService]
 
@@ -253,60 +531,18 @@ flowchart LR
     R --> DB
 
     S --> M[Micrometer]
-    M --> ACT[/actuator/prometheus]
-    ACT --> PROM[Prometheus]
+
+    M --> PROM[Prometheus]
     PROM --> GRAFANA[Grafana]
-
 ```
+
 ![Frontend Dashboard](docs/images/dashboard.png)
----
-
-# 3. Tech Stack
-
-## Backend
-
-- Java 17
-- Spring Boot 4.1.0
-- Spring Web MVC
-- Spring Data JPA
-- Bean Validation
-- Flyway
-- Gradle 9.5.1
-
-## Database / Cache
-
-- MySQL 8.4
-- Redis 8
-
-## Test
-
-- JUnit 5
-- Mockito
-- Testcontainers 2.0.5
-- k6 2.1.0
-
-## Observability
-
-- Spring Boot Actuator
-- Micrometer
-- Prometheus
-- Grafana
-
-## Infrastructure
-
-- Docker
-- Docker Compose
-
-## Frontend
-
-- React
-- Vite
 
 ---
 
-# 4. Domain
+# Event 구조
 
-Event의 핵심 데이터는 다음과 같습니다.
+이벤트에는 다음 정보가 저장됩니다.
 
 ```text
 Event
@@ -314,44 +550,444 @@ Event
 ├─ name
 ├─ capacity
 ├─ currentCount
+├─ strategy
 ├─ openAt
 ├─ closeAt
 └─ version
 ```
 
-신청 내역은 별도의 `EventEntry`로 저장합니다.
+중요한 변경점은 `strategy`입니다.
 
 ```text
-EventEntry
-├─ id
-├─ eventId
-└─ userId
+strategy = ATOMIC
+strategy = PESSIMISTIC
+strategy = OPTIMISTIC
+strategy = REDIS
 ```
 
-동일 사용자의 중복 신청을 최종적으로 방지하기 위해 DB에 다음 UNIQUE 제약조건을 적용했습니다.
+중 하나가 이벤트 생성 시 저장됩니다.
+
+생성 이후 다른 전략으로 요청하면 서버가 거절합니다.
+
+---
+
+# 전략 혼용 방지
+
+예를 들어 다음 이벤트가 있다고 가정합니다.
 
 ```text
-UNIQUE(event_id, user_id)
+Event 10
+
+capacity = 100
+strategy = REDIS
+```
+
+해당 이벤트에 Atomic 방식으로 요청하면:
+
+```text
+REDIS Event
+↓
+Atomic 요청
+↓
+STRATEGY_MISMATCH
+↓
+400 Bad Request
+```
+
+가 반환됩니다.
+
+이를 통해 같은 이벤트에서 Redis와 DB 기반 카운터가 섞여 정원을 초과하는 문제를 방지합니다.
+
+---
+
+# API 오류 처리
+
+주요 오류는 다음과 같이 처리합니다.
+
+| HTTP | Code              | 의미                    |
+| ---- | ----------------- | --------------------- |
+| 400  | INVALID_STRATEGY  | 존재하지 않는 전략 요청         |
+| 400  | STRATEGY_MISMATCH | 이벤트에 설정된 전략과 다른 전략 요청 |
+| 404  | EVENT_NOT_FOUND   | 존재하지 않는 이벤트           |
+| 409  | DUPLICATE_ENTRY   | 동일 사용자의 중복 신청         |
+
+---
+
+# DB Migration
+
+DB 구조 변경은 Flyway로 관리합니다.
+
+```text
+V1__create_events_table.sql
+V2__create_event_entries_table.sql
+V3__add_event_version.sql
+V4__add_event_strategy.sql
+```
+
+`V4`에서 Event에 `strategy` 컬럼을 추가했습니다.
+
+기존 이벤트는 어떤 전략으로 생성되었는지 알 수 없기 때문에 migration 시 기본적으로:
+
+```text
+ATOMIC
+```
+
+으로 설정됩니다.
+
+따라서 Redis / Pessimistic / Optimistic 테스트는 새 이벤트를 생성해서 사용하는 것을 권장합니다.
+
+---
+
+# 주요 접속 주소
+
+| 서비스                | 주소                                          |
+| ------------------ | ------------------------------------------- |
+| Frontend           | `http://localhost:5173`                     |
+| Backend            | `http://localhost:8080`                     |
+| Swagger            | `http://localhost:8080/swagger`             |
+| Health Check       | `http://localhost:8080/actuator/health`     |
+| Prometheus Metrics | `http://localhost:8080/actuator/prometheus` |
+| Prometheus         | `http://localhost:9090`                     |
+| Grafana            | `http://localhost:3000`                     |
+
+Grafana 기본 로그인:
+
+```text
+ID: admin
+PW: admin
 ```
 
 ---
 
-# 5. 동시성 문제 재현
+# Docker 포트
 
-처음에는 의도적으로 가장 단순한 방식으로 구현했습니다.
+현재 Docker Compose 기준 포트는 다음과 같습니다.
 
-개념적으로:
+| 서비스        | PC에서 사용하는 포트 | Docker 내부 |
+| ---------- | -----------: | --------: |
+| MySQL      |         3307 |      3306 |
+| Redis      |         6380 |      6379 |
+| Backend    |         8080 |      8080 |
+| Prometheus |         9090 |      9090 |
+| Grafana    |         3000 |      3000 |
 
-```java
-Event event = findEvent();
+Redis 외부 포트를 `6380`으로 사용하는 이유는 다른 프로젝트나 로컬 Redis가 흔히 사용하는 `6379`와 충돌하는 것을 줄이기 위해서입니다.
 
-if (event.getCurrentCount() < event.getCapacity()) {
-    event.enter();
-    saveEntry();
-}
+Docker 안에서 Backend는 Redis를:
+
+```text
+redis:6379
 ```
 
-단일 요청에서는 문제가 없지만 여러 요청이 동시에 접근하면 다음 상황이 발생할 수 있습니다.
+로 사용하므로 외부 포트와 관계없이 정상 통신합니다.
+
+---
+
+# Backend 테스트 실행
+
+Backend 테스트를 직접 실행하려면 Java 17이 필요합니다.
+
+먼저 MySQL과 Redis를 실행합니다.
+
+```powershell
+docker compose up -d mysql redis
+```
+
+현재 Redis는 PC에서 `6380` 포트를 사용하므로 PowerShell에서 테스트할 때 Redis 포트를 지정합니다.
+
+```powershell
+$env:REDIS_PORT="6380"
+
+.\gradlew.bat clean test
+```
+
+테스트가 모두 성공하면 마지막에:
+
+```text
+BUILD SUCCESSFUL
+```
+
+이 표시됩니다.
+
+테스트 후 환경 변수를 제거하고 싶다면:
+
+```powershell
+Remove-Item Env:REDIS_PORT
+```
+
+를 실행합니다.
+
+---
+
+# 테스트 실패 시 확인
+
+## MySQL 연결 실패
+
+다음 오류가 발생한다면:
+
+```text
+FlywaySqlUnableToConnectToDbException
+CommunicationsException
+ConnectException
+```
+
+MySQL이 실행 중인지 확인합니다.
+
+```powershell
+docker compose ps
+```
+
+`seonchaksun-mysql`이 `healthy`인지 확인합니다.
+
+---
+
+## Redis 포트 충돌
+
+다음 오류가 발생한다면:
+
+```text
+Bind for 0.0.0.0:6379 failed:
+port is already allocated
+```
+
+이미 다른 Redis가 `6379`를 사용 중이라는 의미입니다.
+
+현재 seonchaksun 프로젝트는 외부 Redis 포트를:
+
+```text
+6380
+```
+
+으로 사용하도록 설정되어 있습니다.
+
+확인은:
+
+```powershell
+docker compose ps
+```
+
+로 할 수 있습니다.
+
+---
+
+## Docker Backend 다시 빌드
+
+소스 코드를 수정한 후 Docker에서 변경 사항이 보이지 않는다면 Backend 이미지를 다시 생성합니다.
+
+```powershell
+docker compose down
+docker compose up -d --build
+```
+
+캐시까지 완전히 무시하고 다시 빌드하려면:
+
+```powershell
+docker compose down
+docker compose build --no-cache backend
+docker compose up -d
+```
+
+를 사용합니다.
+
+---
+
+# 성능 테스트
+
+단순 화면 테스트보다 실제로 여러 요청을 보내고 싶다면 k6를 사용할 수 있습니다.
+
+k6가 설치되어 있어야 합니다.
+
+현재 테스트 조건:
+
+```text
+총 요청 수 = 200
+동시 VU = 32
+정원 = 100
+```
+
+즉 정확히 200명이 같은 순간에 요청하는 테스트라기보다:
+
+```text
+32개의 가상 사용자가
+총 200개의 신청 요청을 처리
+```
+
+하는 테스트입니다.
+
+---
+
+## Atomic
+
+```powershell
+.\scripts\benchmark.ps1 -Strategy atomic
+```
+
+## Pessimistic
+
+```powershell
+.\scripts\benchmark.ps1 -Strategy pessimistic
+```
+
+## Optimistic
+
+```powershell
+.\scripts\benchmark.ps1 -Strategy optimistic
+```
+
+## Redis
+
+```powershell
+.\scripts\benchmark.ps1 -Strategy redis
+```
+
+Benchmark Script는 전략별로 새로운 Event를 자동 생성합니다.
+
+```text
+Event 생성
+↓
+Warm-up 1회
+↓
+10초 대기
+↓
+Measured Run 1
+↓
+10초 대기
+↓
+Measured Run 2
+↓
+...
+↓
+Measured Run 5
+```
+
+따라서 서로 다른 전략의 카운터가 섞이지 않습니다.
+
+---
+
+# 기대 결과
+
+정원 100명 이벤트에 총 200개의 요청을 보내는 경우 목표는:
+
+```text
+Success             = 100
+Business Failure    = 100
+Unexpected Failure  = 0
+```
+
+입니다.
+
+여기서 `Business Failure`는 시스템 장애가 아닙니다.
+
+예를 들어:
+
+```text
+정원이 이미 마감됨
+중복 신청
+```
+
+처럼 정상적으로 거절된 요청입니다.
+
+가장 중요한 값은:
+
+```text
+Unexpected Failure = 0
+```
+
+입니다.
+
+---
+
+# 모니터링
+
+Backend는 Micrometer를 이용해 지표를 수집합니다.
+
+```text
+Spring Boot
+↓
+Micrometer
+↓
+/actuator/prometheus
+↓
+Prometheus
+↓
+Grafana
+```
+
+Grafana:
+
+```text
+http://localhost:3000
+```
+
+기본 로그인:
+
+```text
+admin / admin
+```
+
+![Grafana Dashboard](docs/images/grafana-dashboard.png)
+
+---
+
+# Tech Stack
+
+## Backend
+
+* Java 17
+* Spring Boot
+* Spring Web MVC
+* Spring Data JPA
+* Bean Validation
+* Flyway
+* Gradle
+
+## Database / Cache
+
+* MySQL 8.4
+* Redis
+
+## Frontend
+
+* React
+* Vite
+
+## Test
+
+* JUnit 5
+* Mockito
+* k6
+
+## Monitoring
+
+* Spring Boot Actuator
+* Micrometer
+* Prometheus
+* Grafana
+
+## Infrastructure
+
+* Docker
+* Docker Compose
+
+---
+
+# 프로젝트에서 확인한 문제
+
+처음 구현에서는 단순하게:
+
+```text
+Event 조회
+↓
+현재 신청자 확인
+↓
+currentCount + 1
+↓
+저장
+```
+
+방식으로 처리했습니다.
+
+하지만 여러 요청이 동시에 접근하면:
 
 ```text
 Thread A → currentCount = 20 조회
@@ -363,1266 +999,176 @@ B → 21 저장
 C → 21 저장
 ```
 
-실제 동시성 테스트 결과:
+처럼 여러 요청의 변경 내용이 덮어써지는 **Lost Update**가 발생했습니다.
 
-```text
-요청 수       : 200
-이벤트 정원   : 100
-
-성공 요청     : 40
-EventEntry    : 40
-currentCount  : 20
-```
-
-`EventEntry`는 40개인데 `currentCount`는 20으로 기록되는 **Lost Update**를 확인했습니다.
-
-이 문제를 기준으로 네 가지 동시성 제어 전략을 구현했습니다.
+이 문제를 기준으로 네 가지 전략을 구현했습니다.
 
 ---
 
-# 6. Atomic Update
-
-## 아이디어
-
-애플리케이션에서:
+# 프로젝트 진행 과정
 
 ```text
-조회
-→ 정원 확인
-→ 증가
+단순 구현
+    ↓
+동시성 문제 재현
+    ↓
+Lost Update 확인
+    ↓
+Atomic Update 구현
+    ↓
+Pessimistic Lock 구현
+    ↓
+Optimistic Lock + Retry 구현
+    ↓
+Redis Lua Script 구현
+    ↓
+동시성 테스트
+    ↓
+k6 HTTP 부하 테스트
+    ↓
+MySQL MVCC 문제 발견
+    ↓
+Locking Read 적용
+    ↓
+Prometheus / Grafana 모니터링
+    ↓
+전략별 Trade-off 비교
 ```
-
-를 나누어 처리하지 않고 DB UPDATE 한 번으로 처리합니다.
-
-```sql
-UPDATE events
-SET current_count = current_count + 1
-WHERE id = ?
-  AND current_count < capacity;
-```
-
-실제 JPQL 구현:
-
-```java
-@Modifying(
-    flushAutomatically = true,
-    clearAutomatically = true
-)
-@Query("""
-    UPDATE Event e
-       SET e.currentCount = e.currentCount + 1,
-           e.version = e.version + 1
-     WHERE e.id = :eventId
-       AND e.currentCount < e.capacity
-       AND e.openAt <= :now
-       AND e.closeAt > :now
-""")
-int incrementCurrentCount(
-        @Param("eventId") Long eventId,
-        @Param("now") LocalDateTime now
-);
-```
-
-UPDATE 결과:
-
-```text
-affected rows = 1
-→ 정원 확보 성공
-
-affected rows = 0
-→ 신청 불가능
-```
-
-### 장점
-
-- 구현이 비교적 단순
-- 별도의 Row Lock 조회가 필요하지 않음
-- 높은 경합에서도 안정적
-- DB 한 곳에서 정합성 관리 가능
-
-### 고려사항
-
-JPQL Bulk Update는 JPA Dirty Checking을 우회하기 때문에 `@Version`도 직접 증가시켰습니다.
 
 ---
 
-# 7. Pessimistic Lock
+# 전략 비교
 
-## 아이디어
+| 전략          | 핵심 방식           | 장점          | 고려사항                    |
+| ----------- | --------------- | ----------- | ----------------------- |
+| Atomic      | 조건부 UPDATE      | 단순하고 안정적    | Event Row 경합            |
+| Pessimistic | DB Row Lock     | 정합성 이해가 쉬움  | Lock Wait               |
+| Optimistic  | Version + Retry | Lock 대기를 줄임 | 높은 경합에서 Retry 증가        |
+| Redis       | Lua Counter     | 높은 처리량      | Redis + MySQL 정합성 관리 필요 |
 
-충돌이 발생한다고 가정하고 Event Row에 쓰기 잠금을 획득합니다.
+어떤 전략이 항상 가장 좋다고 볼 수는 없습니다.
 
-개념적으로:
-
-```sql
-SELECT *
-FROM events
-WHERE id = ?
-FOR UPDATE;
-```
-
-JPA에서는:
-
-```java
-@Lock(LockModeType.PESSIMISTIC_WRITE)
-```
-
-를 사용했습니다.
-
-처리 흐름:
-
-```text
-Thread A
-→ Row Lock 획득
-→ 정원 확인
-→ currentCount 증가
-→ EventEntry 저장
-→ Commit
-→ Lock 해제
-
-Thread B
-→ Lock 해제까지 대기
-```
-
-### 장점
-
-- 동작 방식이 명확함
-- 높은 경합에서도 정합성 유지가 쉬움
-- Retry 로직이 필요하지 않음
-
-### 단점
-
-- Lock Wait 발생 가능
-- 트랜잭션이 길면 처리량 저하 가능
-- Deadlock 가능성 고려 필요
-
-따라서 Lock을 보유하는 트랜잭션 범위를 가능한 짧게 유지했습니다.
+트래픽 규모, 인프라 구성, 데이터 정합성 요구사항에 따라 선택해야 합니다.
 
 ---
 
-# 8. Optimistic Lock
+# Redis + MySQL의 한계
 
-## 아이디어
-
-DB Row를 미리 잠그지 않고 `version` 값으로 충돌을 감지합니다.
-
-```java
-@Version
-private Long version;
-```
-
-개념적으로:
-
-```sql
-UPDATE events
-SET current_count = ?,
-    version = version + 1
-WHERE id = ?
-  AND version = ?;
-```
-
-동일 version을 조회한 여러 요청 중 한 요청만 성공하고 나머지는 충돌합니다.
+Redis 전략은:
 
 ```text
-조회
+Redis 자리 확보
 ↓
-수정 시도
+MySQL 신청 내역 저장
+```
+
+순서로 처리합니다.
+
+MySQL 저장에 실패하면 Redis 카운터를 다시 감소시키는 보상 처리를 수행합니다.
+
+하지만 다음 상황까지 완벽하게 하나의 Transaction으로 묶을 수는 없습니다.
+
+```text
+Redis 성공
 ↓
-Version 충돌
+MySQL 처리 성공
 ↓
-Backoff
+Transaction Commit 실패
+```
+
+또는:
+
+```text
+MySQL 실패
 ↓
-재조회
-↓
-Retry
+Redis 보상 처리도 실패
 ```
 
-현재 설정:
+실제 서비스라면 다음과 같은 방법을 추가로 고려할 수 있습니다.
 
-```text
-MAX_RETRY = 100
-Backoff   = random 1~5ms
-```
+* Retry Queue
+* Reconciliation
+* Transactional Outbox
+* 메시지 큐 기반 비동기 처리
 
-Retry를 새로운 트랜잭션에서 수행하기 위해 Retry Facade와 Worker를 별도 Bean으로 분리했습니다.
-
-### 특징
-
-Optimistic Lock은 대부분의 요청은 빠르게 끝날 수 있지만 높은 경합 환경에서는 일부 요청이 반복적으로 충돌하면서 Tail Latency가 증가할 수 있습니다.
-
-최종 측정에서도 이 특징이 명확하게 확인되었습니다.
+이 프로젝트에서는 이러한 구조적 한계를 숨기지 않고 명시적으로 문서화했습니다.
 
 ---
 
-# 9. Redis Lua Script
+# 종료 방법
 
-Redis를 분산 락으로 사용하지 않고 **정원 Counter 자체를 Redis에서 원자적으로 관리**했습니다.
-
-Lua Script:
-
-```lua
-local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-local capacity = tonumber(ARGV[1])
-
-if current >= capacity then
-    return 0
-end
-
-redis.call('INCR', KEYS[1])
-
-return 1
-```
-
-Key:
-
-```text
-event:capacity:{eventId}
-```
-
-Lua Script 안에서:
-
-```text
-현재 Counter 조회
-+
-정원 확인
-+
-Counter 증가
-```
-
-를 원자적으로 수행합니다.
-
----
-
-# 10. Redis + MySQL 처리 흐름
-
-Redis 전략에서도 실제 신청 내역은 MySQL에 저장합니다.
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API
-    participant Redis
-    participant MySQL
-
-    Client->>API: 신청 요청
-    API->>Redis: Lua Script로 정원 확보
-
-    alt 정원 확보 실패
-        Redis-->>API: 실패
-        API-->>Client: 신청 불가
-    else 정원 확보 성공
-        Redis-->>API: 성공
-        API->>MySQL: EventEntry 저장
-        MySQL-->>API: 저장 완료
-        API-->>Client: 신청 성공
-    end
-```
-
-Redis 전략에서는 Redis Counter를 현재 신청 인원의 기준으로 사용합니다.
-
-따라서:
-
-```text
-events.current_count = 0
-```
-
-으로 유지하며 정상 상태는:
-
-```text
-Redis Counter = 100
-EventEntry     = 100
-```
-
-입니다.
-
----
-
-# 11. Redis 보상 처리
-
-Redis에서는 자리를 확보했지만 MySQL 저장이 실패할 수 있습니다.
-
-```text
-Redis Counter
-99 → 100
-
-↓
-
-EventEntry INSERT 실패
-```
-
-보상 처리가 없다면 실제 신청은 99건인데 Redis는 100명으로 판단합니다.
-
-따라서:
-
-```text
-Redis Reserve
-      ↓
-EventEntry 저장
-      ↓
-DB 저장 실패
-      ↓
-Redis Release
-```
-
-흐름으로 보상 처리합니다.
-
----
-
-# 12. Redis Dual Write 한계
-
-현재 방식으로도 Redis와 MySQL 사이의 완벽한 원자성을 보장할 수는 없습니다.
-
-예:
-
-```text
-Redis Reserve 성공
-↓
-saveAndFlush 성공
-↓
-Transaction Commit 단계에서 실패
-```
-
-서비스 내부의 단순 `try-catch`만으로는 이 경우를 완벽하게 처리하기 어렵습니다.
-
-또한 Redis Release 자체가 실패할 수도 있습니다.
-
-향후 발전 방향:
-
-```text
-TransactionSynchronization
-Retry Queue
-Reconciliation
-Transactional Outbox
-```
-
-XA / 2PC는 현재 프로젝트 규모 대비 복잡도가 크다고 판단하여 적용하지 않았습니다.
-
----
-
-# 13. 중복 신청 Race Condition
-
-애플리케이션에서:
-
-```java
-existsByEventIdAndUserId(...)
-```
-
-를 먼저 확인하더라도 두 요청이 동시에 검사하면 둘 다 신청 데이터가 없다고 판단할 수 있습니다.
-
-```text
-Request A → 중복 없음
-Request B → 중복 없음
-
-A → INSERT
-B → INSERT
-```
-
-따라서 DB를 최종 방어선으로 사용했습니다.
-
-```text
-UNIQUE(event_id, user_id)
-```
-
-동일 사용자가 동시에 20번 요청하는 테스트 결과:
-
-```text
-Success        : 1
-Duplicate      : 19
-Unexpected     : 0
-
-Event Count    : 1
-EventEntry     : 1
-```
-
-을 확인했습니다.
-
----
-
-# 14. Atomic 전략에서 발견한 MVCC 문제
-
-부하 테스트 과정에서 Atomic 전략에 예상하지 못한 HTTP 500 오류가 발생했습니다.
-
-초기 결과:
-
-```text
-Success             : 100
-Business Failure    : 91
-Unexpected Failure  : 9
-```
-
-Atomic UPDATE 자체의 문제는 아니었습니다.
-
-## 원인
-
-MySQL의:
-
-```text
-REPEATABLE_READ
-+
-MVCC
-```
-
-가 원인이었습니다.
-
-Atomic UPDATE는 최신 Row를 기준으로 조건을 평가합니다.
-
-예:
-
-```text
-실제 current_count = 100
-capacity            = 100
-```
-
-Atomic UPDATE:
-
-```text
-current_count < capacity
-→ false
-→ affected rows = 0
-```
-
-하지만 같은 트랜잭션에서 수행한 일반 SELECT는 MVCC Snapshot에 의해 이전 값을 볼 수 있었습니다.
-
-```text
-실제 DB = 100
-일반 SELECT = 95
-```
-
-이 때문에 애플리케이션이 신청 실패 원인을 정상적으로 판단하지 못해 fallback `IllegalStateException`이 발생했습니다.
-
----
-
-## 해결
-
-실패 원인을 확인하는 조회에만 Locking Read를 적용했습니다.
-
-```java
-@Lock(LockModeType.PESSIMISTIC_WRITE)
-@Query("""
-    SELECT e
-      FROM Event e
-     WHERE e.id = :eventId
-""")
-Optional<Event> findByIdWithPessimisticLock(
-        @Param("eventId") Long eventId
-);
-```
-
-중요한 점은 Atomic 전략 전체를 Pessimistic 방식으로 변경한 것이 아니라:
-
-```text
-Atomic UPDATE 정상 경로
-→ 그대로 유지
-
-Atomic UPDATE 실패 후 원인 조회
-→ Locking Read 적용
-```
-
-했다는 점입니다.
-
-수정 후:
-
-```text
-Success             : 100
-Business Failure    : 100
-Unexpected Failure  : 0
-```
-
-으로 정상화되었습니다.
-
----
-
-# 15. API
-
-## Event 생성
-
-```http
-POST /api/events
-```
-
-이벤트를 생성할 때 사용할 동시성 처리 전략을 하나 지정합니다.
-생성된 이벤트는 이후 다른 전략으로 변경해서 신청할 수 없습니다.
-
-예시:
-
-```json
-{
-  "name": "Atomic 테스트",
-  "capacity": 100,
-  "strategy": "ATOMIC",
-  "openAt": "2026-09-01T10:00:00",
-  "closeAt": "2026-09-01T12:00:00"
-}
-```
-
-지원 값:
-
-```text
-ATOMIC
-PESSIMISTIC
-OPTIMISTIC
-REDIS
-```
-
-## Event 조회
-
-```http
-GET /api/events/{eventId}
-```
-
-## Event 상태 조회
-
-```http
-GET /api/events/{eventId}/status?strategy={strategy}
-```
-
-## 기본 신청
-
-```http
-POST /api/events/{eventId}/entries
-```
-
-이벤트 생성 시 저장된 전략을 자동으로 사용합니다.
-
-## 전략별 신청
-
-```http
-POST /api/events/{eventId}/entries/strategies/{strategy}
-```
-
-URL의 전략은 이벤트 생성 시 저장한 전략과 같아야 합니다.
-다른 전략을 요청하면 `400 STRATEGY_MISMATCH`를 반환합니다.
-
-지원 전략:
-
-```text
-atomic
-pessimistic
-optimistic
-redis
-```
-
----
-
-# 16. Swagger
-
-```text
-http://localhost:8080/swagger
-```
-
-OpenAPI JSON:
-
-```text
-http://localhost:8080/v3/api-docs
-```
-
-Swagger를 통해 Event 생성 및 전략별 신청 API를 직접 호출할 수 있습니다.
-
----
-
-# 17. Monitoring
-
-전략별 요청 결과를 Micrometer Custom Metric으로 수집합니다.
-
-```text
-HTTP Request
-     ↓
-EventEntryStrategyService
-     ↓
-EntryMetrics
-     ↓
-Micrometer
-     ↓
-/actuator/prometheus
-     ↓
-Prometheus
-     ↓
-Grafana
-```
-
-Custom Metric:
-
-```text
-seonchaksun.entry.requests
-seonchaksun.entry.duration
-```
-
-Prometheus Metric:
-
-```text
-seonchaksun_entry_requests_total
-seonchaksun_entry_duration_seconds_count
-seonchaksun_entry_duration_seconds_sum
-```
-![Grafana Monitoring](docs/images/grafana-dashboard.png)
----
-
-# 18. 실패 Metric 분리
-
-선착순 시스템에서 정원 100명에 요청 200건이 들어오면:
-
-```text
-100명 성공
-100명 정원 초과
-```
-
-는 정상 동작입니다.
-
-따라서 단순 성공/실패 대신:
-
-```text
-success
-business_failure
-unexpected_failure
-```
-
-로 구분합니다.
-
-## success
-
-정상 신청 성공
-
-## business_failure
-
-예상 가능한 정상 거절:
-
-```text
-정원 초과
-중복 신청
-신청 가능 시간이 아님
-존재하지 않는 이벤트
-```
-
-## unexpected_failure
-
-예상하지 못한 시스템 오류:
-
-```text
-RuntimeException
-HTTP 500
-```
-
-Frontend에서는 더 직관적으로:
-
-```text
-성공
-정상 거절
-시스템 오류
-```
-
-라는 표현을 사용합니다.
-
----
-
-# 19. Grafana Dashboard
-
-주요 Dashboard 패널:
-
-```text
-JVM 힙 메모리 사용량
-백엔드 CPU 사용률
-초당 HTTP 요청 수
-HTTP 평균 응답 시간
-
-전략별 신청 요청 수
-전략별 신청 성공 수
-전략별 비즈니스 실패 수
-전략별 시스템 오류 수
-전략별 평균 처리 시간
-```
-
-Grafana Dashboard는 JSON과 Provisioning 설정을 Repository에서 관리합니다.
-
-```text
-monitoring/
-└─ grafana/
-   ├─ dashboards/
-   │  └─ seonchaksun-backend-monitoring.json
-   │
-   └─ provisioning/
-      ├─ dashboards/
-      │  └─ dashboard.yml
-      └─ datasources/
-         └─ datasource.yml
-```
-
-따라서 Grafana 내부 데이터가 초기화되더라도 Repository 설정을 통해 Dashboard를 다시 구성할 수 있습니다.
-
----
-
-# 20. k6 Load Test
-
-HTTP 레이어까지 포함한 성능 비교를 위해 k6를 사용했습니다.
-
-테스트 조건:
-
-```text
-Event Capacity : 100
-HTTP Requests  : 200
-VUs            : 32
-Scenario       : shared-iterations
-```
-
-기대 결과:
-
-```text
-Success             = 100
-Business Failure    = 100
-Unexpected Failure  = 0
-```
-
-모든 최종 Benchmark 회차에서 이 조건을 만족했습니다.
-
-> `32 VUs / 200 shared iterations` 방식이며 200개의 요청이 정확히 동일한 시각에 시작한다는 의미는 아닙니다.
-
----
-
-# 21. Warm-up 적용
-
-초기 반복 측정에서는 여러 전략에서 첫 Run보다 이후 Run이 빨라지는 경향이 확인되었습니다.
-
-특히 Redis에서 초기 실행의 편차가 크게 나타났습니다.
-
-가능한 영향:
-
-```text
-JVM JIT
-Connection Pool
-Redis Client Connection
-DB Buffer / Cache
-Application Warm-up
-```
-
-따라서 최종 Benchmark는:
-
-```text
-Warm-up 1회
-→ 측정값에서 제외
-
-Measured Run 5회
-→ 평균 계산
-```
-
-방식으로 수행했습니다.
-
-모든 회차마다 새로운 Event를 생성했습니다.
-
----
-
-# 22. Benchmark 자동화
-
-반복 측정을 위해:
-
-```text
-scripts/benchmark.ps1
-```
-
-을 작성했습니다.
-
-사용 방법:
+프로젝트 사용을 끝냈다면 Docker 서비스를 종료할 수 있습니다.
 
 ```powershell
-.\scripts\benchmark.ps1 -Strategy atomic
+docker compose down
 ```
+
+데이터까지 모두 삭제하고 완전히 초기화하려면:
 
 ```powershell
-.\scripts\benchmark.ps1 -Strategy pessimistic
+docker compose down -v
 ```
 
-```powershell
-.\scripts\benchmark.ps1 -Strategy optimistic
-```
-
-```powershell
-.\scripts\benchmark.ps1 -Strategy redis
-```
-
-자동화 흐름:
-
-```text
-Event 생성
-↓
-Warm-up
-↓
-10초 대기
-↓
-Measured Run 1
-↓
-...
-↓
-Measured Run 5
-```
+`-v`를 사용하면 MySQL / Redis 데이터도 삭제되므로 주의해야 합니다.
 
 ---
 
-# 23. Final Benchmark
+# 가장 간단한 체험 순서 요약
 
-테스트 조건:
+개발을 잘 모른다면 아래 순서만 따라 하면 됩니다.
 
 ```text
-Capacity      : 100
-Requests      : 200
-VUs           : 32
-Warm-up       : 1회
-Measured Runs : 5회
+1. Docker Desktop 실행
+
+2. 프로젝트 폴더에서
+   docker compose up -d --build
+
+3. 새 PowerShell에서
+   cd frontend
+   npm.cmd install
+   npm.cmd run dev
+
+4. Chrome에서
+   http://localhost:5173
+
+5. 이벤트 생성
+   이름: 테스트
+   정원: 3
+   전략: Atomic
+
+6. 사용자 신청
+   1001 → 성공
+   1002 → 성공
+   1003 → 성공
+   1004 → 실패
+
+7. 1001 다시 신청
+   → 중복 신청 실패
+
+8. 새로운 이벤트 생성
+   전략: Redis
+
+9. 동일하게 신청 테스트
+
+10. Atomic / Redis 결과 비교
 ```
+
+이 흐름만 확인해도 프로젝트의 핵심 기능을 직접 체험할 수 있습니다.
 
 ---
 
-## Atomic
+# 상세 기술 문서
 
-| Run | Avg | p95 | p99 | Req/s |
-|---|---:|---:|---:|---:|
-| 1 | 97.78 ms | 144.27 ms | 146.10 ms | 309.95 |
-| 2 | 83.39 ms | 134.48 ms | 135.25 ms | 362.17 |
-| 3 | 81.09 ms | 126.98 ms | 129.36 ms | 371.51 |
-| 4 | 75.08 ms | 118.96 ms | 119.81 ms | 402.71 |
-| 5 | 74.65 ms | 120.05 ms | 120.84 ms | 406.01 |
-
-평균:
-
-```text
-Avg   : 82.40 ms
-p95   : 128.95 ms
-p99   : 130.27 ms
-Req/s : 370.47
-```
-
----
-
-## Pessimistic
-
-| Run | Avg | p95 | p99 | Req/s |
-|---|---:|---:|---:|---:|
-| 1 | 81.42 ms | 138.45 ms | 139.51 ms | 374.34 |
-| 2 | 79.73 ms | 142.74 ms | 143.91 ms | 381.66 |
-| 3 | 81.05 ms | 146.65 ms | 147.54 ms | 376.25 |
-| 4 | 76.44 ms | 131.09 ms | 132.71 ms | 396.87 |
-| 5 | 76.72 ms | 133.09 ms | 134.96 ms | 397.46 |
-
-평균:
-
-```text
-Avg   : 79.07 ms
-p95   : 138.40 ms
-p99   : 139.73 ms
-Req/s : 385.32
-```
-
----
-
-## Optimistic
-
-| Run | Avg | p95 | p99 | Req/s |
-|---|---:|---:|---:|---:|
-| 1 | 115.19 ms | 409.83 ms | 579.69 ms | 270.93 |
-| 2 | 109.21 ms | 364.34 ms | 475.04 ms | 286.11 |
-| 3 | 102.80 ms | 327.40 ms | 460.84 ms | 302.01 |
-| 4 | 111.49 ms | 390.65 ms | 671.49 ms | 280.09 |
-| 5 | 91.97 ms | 343.59 ms | 548.88 ms | 338.14 |
-
-평균:
-
-```text
-Avg   : 106.13 ms
-p95   : 367.16 ms
-p99   : 547.19 ms
-Req/s : 295.46
-```
-
----
-
-## Redis
-
-| Run | Avg | p95 | p99 | Req/s |
-|---|---:|---:|---:|---:|
-| 1 | 19.93 ms | 28.62 ms | 31.36 ms | 1394.46 |
-| 2 | 20.84 ms | 30.27 ms | 44.91 ms | 1349.40 |
-| 3 | 18.91 ms | 28.49 ms | 29.81 ms | 1485.47 |
-| 4 | 18.96 ms | 27.29 ms | 38.77 ms | 1473.18 |
-| 5 | 22.83 ms | 37.15 ms | 39.96 ms | 1249.43 |
-
-평균:
-
-```text
-Avg   : 20.29 ms
-p95   : 30.36 ms
-p99   : 36.96 ms
-Req/s : 1390.39
-```
-
----
-
-# 24. 최종 전략 비교
-
-| Strategy | Avg | p95 | p99 | Req/s | 정확성 |
-|---|---:|---:|---:|---:|---|
-| Atomic | 82.40 ms | 128.95 ms | 130.27 ms | 370.47 | 100% |
-| Pessimistic | 79.07 ms | 138.40 ms | 139.73 ms | 385.32 | 100% |
-| Optimistic | 106.13 ms | 367.16 ms | 547.19 ms | 295.46 | 100% |
-| Redis | **20.29 ms** | **30.36 ms** | **36.96 ms** | **1390.39** | 100% |
-
----
-
-# 25. 결과 분석
-
-## Redis
-
-이번 테스트 조건에서는 가장 높은 처리량과 가장 낮은 응답시간을 기록했습니다.
-
-```text
-Avg   : 20.29 ms
-p95   : 30.36 ms
-p99   : 36.96 ms
-Req/s : 1390.39
-```
-
-Redis Lua Script를 통해 정원 확인과 Counter 증가를 원자적으로 처리하면서 DB Row에 대한 경합을 크게 줄일 수 있었습니다.
-
-다만 Redis와 MySQL 두 저장소 사이의 정합성 문제가 추가되므로 성능만으로 무조건 최선이라고 볼 수는 없습니다.
-
----
-
-## Atomic
-
-Atomic은 명시적인 Row Lock 없이 안정적인 성능을 보였습니다.
-
-특히:
-
-```text
-p95 = 128.95 ms
-p99 = 130.27 ms
-```
-
-로 MySQL 기반 전략 중 가장 낮은 Tail Latency를 기록했습니다.
-
-구현 복잡도와 성능의 균형이 좋은 전략이라고 판단했습니다.
-
----
-
-## Pessimistic
-
-이번 환경에서는 MySQL 기반 전략 중 평균 응답시간과 처리량이 가장 좋았습니다.
-
-```text
-Avg   = 79.07 ms
-Req/s = 385.32
-```
-
-Atomic과 큰 차이는 아니었습니다.
-
-높은 경합 상황에서 Lock으로 요청을 직렬화하는 방식이 안정적으로 동작할 수 있음을 확인했습니다.
-
----
-
-## Optimistic
-
-Optimistic은 Tail Latency 증가가 가장 두드러졌습니다.
-
-```text
-Avg = 106.13 ms
-p95 = 367.16 ms
-p99 = 547.19 ms
-```
-
-대부분의 요청은 빠르게 처리됐지만 일부 요청은 Version 충돌 후 Retry가 반복되면서 긴 응답시간을 기록했습니다.
-
-따라서 선착순 시스템처럼 특정 Row에 요청이 집중되는 환경에서는 Optimistic Lock의 Retry 비용이 크게 증가할 수 있음을 확인했습니다.
-
----
-
-# 26. 전략 선택에 대한 결론
-
-특정 동시성 전략 하나가 항상 정답은 아닙니다.
-
-## Atomic Update
-
-적합한 경우:
-
-```text
-단일 DB 중심 시스템
-단순한 Counter 조건
-구현 복잡도를 낮추고 싶음
-높은 경합에서도 안정적인 Tail Latency 필요
-```
-
-## Pessimistic Lock
-
-적합한 경우:
-
-```text
-충돌이 빈번함
-데이터 정합성이 매우 중요함
-Row Lock 대기를 허용할 수 있음
-```
-
-## Optimistic Lock
-
-적합한 경우:
-
-```text
-충돌 빈도가 낮음
-긴 DB Lock을 피하고 싶음
-Retry 비용이 크지 않음
-```
-
-## Redis
-
-적합한 경우:
-
-```text
-높은 처리량 필요
-DB Row 경합을 줄이고 싶음
-Redis 운영이 가능함
-Dual Write 정합성 문제를 별도로 해결할 수 있음
-```
-
----
-
-# 27. Benchmark 한계
-
-성능 결과는 다음 환경에서 측정했습니다.
-
-```text
-Local Windows PC
-Docker Compose
-Single Backend Instance
-Single MySQL Instance
-Single Redis Instance
-```
-
-따라서:
-
-```text
-Redis는 항상 다른 전략보다 N배 빠르다
-```
-
-와 같이 일반화할 수 없습니다.
-
-실제 운영 환경에서는 다음 조건에 따라 결과가 달라질 수 있습니다.
-
-```text
-Network Latency
-Hardware
-DB Spec
-Redis Spec
-Connection Pool
-Backend Instance 수
-Redis Cluster
-MySQL Replication
-GC
-Traffic Pattern
-JVM Warm-up
-```
-
-현재 Benchmark는 동일한 로컬 환경에서 전략 간 상대적인 특성을 비교하기 위한 결과입니다.
-
----
-
-# 28. Local Run
-
-## Docker 실행
-
-```powershell
-docker compose up -d
-```
-
-확인:
-
-```powershell
-docker compose ps
-```
-
----
-
-## Backend
-
-```text
-http://localhost:8080
-```
-
-Health:
-
-```text
-http://localhost:8080/actuator/health
-```
-
-Swagger:
-
-```text
-http://localhost:8080/swagger
-```
-
----
-
-## Prometheus
-
-```text
-http://localhost:9090
-```
-
----
-
-## Grafana
-
-```text
-http://localhost:3000
-```
-
----
-
-## Frontend
-
-```powershell
-cd frontend
-npm.cmd install
-npm.cmd run dev
-```
-
-```text
-http://localhost:5173
-```
-
----
-
-# 29. Test
-
-전체 테스트:
-
-```powershell
-.\gradlew.bat test
-```
-
----
-
-# 30. Project Structure
-
-```text
-seonchaksun
-├─ src
-│  ├─ main
-│  │  ├─ java
-│  │  │  └─ com.seonchaksun
-│  │  │     ├─ event
-│  │  │     ├─ entry
-│  │  │     │  ├─ controller
-│  │  │     │  ├─ domain
-│  │  │     │  ├─ repository
-│  │  │     │  ├─ service
-│  │  │     │  └─ metric
-│  │  │     └─ common
-│  │  │
-│  │  └─ resources
-│  │     └─ db
-│  │        └─ migration
-│  │
-│  └─ test
-│
-├─ frontend
-│
-├─ k6
-│  └─ entry-burst.js
-│
-├─ scripts
-│  └─ benchmark.ps1
-│
-├─ monitoring
-│  ├─ prometheus
-│  │  └─ prometheus.yml
-│  │
-│  └─ grafana
-│     ├─ dashboards
-│     └─ provisioning
-│
-├─ docs
-│  ├─ concurrency-strategy.md
-│  └─ images
-│
-├─ Dockerfile
-├─ docker-compose.yml
-├─ build.gradle
-└─ README.md
-```
-
----
-
-# 31. 상세 기술 문서
-
-동시성 전략, Race Condition, Retry, MVCC, Redis Dual Write에 대한 보다 상세한 내용은 다음 문서에서 확인할 수 있습니다.
+동시성 전략별 자세한 구현 및 분석은 다음 문서를 참고합니다.
 
 ```text
 docs/concurrency-strategy.md
 ```
 
----
-
-# 32. 프로젝트를 통해 확인한 점
-
-이 프로젝트에서 가장 크게 확인한 것은 **동시성 문제는 코드만 보고 판단하기 어렵다는 것**이었습니다.
-
-Atomic Update를 적용했다고 해서 문제가 모두 끝난 것이 아니었고, 실제 HTTP 부하 테스트에서 MySQL REPEATABLE_READ와 MVCC의 상호작용으로 예상하지 못한 오류를 발견했습니다.
-
-Optimistic Lock도 단순히 Lock을 잡지 않는다는 이유로 항상 빠른 것이 아니라, 높은 경합에서는 Retry로 인해 p95와 p99가 크게 증가했습니다.
-
-Redis는 가장 높은 처리량을 보여줬지만 대신 MySQL과 Redis 사이의 Dual Write라는 새로운 문제를 만들었습니다.
-
-결국 동시성 전략을 선택할 때는:
+프로젝트 수정 내역은:
 
 ```text
-정확성
-성능
-구현 복잡도
-운영 복잡도
-장애 복구
+PATCH_NOTES.md
 ```
 
-를 함께 고려해야 한다는 점을 확인했습니다.
-
----
-
-# 33. 프로젝트 핵심 요약
-
-이 프로젝트는 선착순 기능 자체를 만드는 것이 목적이 아닙니다.
-
-**선착순이라는 높은 경합 상황을 이용해 동시성 제어 방식의 차이와 트레이드오프를 직접 구현하고 검증하는 프로젝트입니다.**
-
-```text
-Lost Update 재현
-
-       ↓
-
-Atomic
-Pessimistic
-Optimistic
-Redis
-
-       ↓
-
-정확성 검증
-
-       ↓
-
-k6 Benchmark
-
-       ↓
-
-MVCC 문제 발견 및 해결
-
-       ↓
-
-Prometheus / Grafana Monitoring
-
-       ↓
-
-전략별 성능과 한계 비교
-```
-
-최종적으로 단순히:
-
-> "동시성 처리를 구현했다."
-
-에서 끝나는 것이 아니라,
-
-> **문제를 재현하고, 원인을 분석하고, 여러 해결책을 비교하고, 실제 부하를 통해 검증하고, 운영 지표까지 관찰하는 과정**
-
-을 경험하는 것을 목표로 했습니다.
+에서 확인할 수 있습니다.
