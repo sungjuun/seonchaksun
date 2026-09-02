@@ -1113,8 +1113,6 @@ docker compose down -v
 
 # 가장 간단한 체험 순서 요약
 
-개발을 잘 모른다면 아래 순서만 따라 하면 됩니다.
-
 ```text
 1. Docker Desktop 실행
 
